@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "capability.schema.json",
+  "title": "Capability Definition",
+  "description": "Schema for agent capability (skill) definitions in the manifest system.",
+  "type": "object",
+  "required": ["apiVersion", "kind", "id", "title", "description", "body"],
+  "properties": {
+    "apiVersion": { "type": "string", "const": "agent.meta/v1" },
+    "kind": { "type": "string", "const": "capability" },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "description": "Globally unique kebab-case identifier."
+    },
+    "title": { "type": "string", "description": "Human-readable title." },
+    "description": {
+      "type": "string",
+      "description": "Short description of when to use this capability."
+    },
+    "body": {
+      "type": "string",
+      "description": "Inline capability body text."
+    },
+    "paths": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "File path patterns that trigger this capability."
+    },
+    "manual_only": {
+      "type": "boolean",
+      "default": false,
+      "description": "If true, capability is only invoked manually."
+    },
+    "user_visible": {
+      "type": "boolean",
+      "default": true,
+      "description": "If true, capability is visible to the user."
+    },
+    "references": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Paths to reference documents."
+    },
+    "scripts": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Paths to associated scripts."
+    },
+    "owners": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Ownership teams or roles."
+    }
+  },
+  "additionalProperties": false
+}
