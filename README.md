@@ -46,6 +46,9 @@ Image-to-markdown tern runtime options:
 - `auto` tries `--server` first and falls back to in-process tern server boot.
 - `inproc` boots `github.com/axsh/arctic-tern/server` in the same process.
 
+`image-to-markdown` final output is table-faithful Markdown centered on the source table from the image.
+Intermediate phase analysis tables and explanatory report sections (for example element inventories or interpretation tables) are not included in the delivered document.
+
 Backend selection:
 
 - `excel-to-pdf --backend auto|libreoffice|excel-com`

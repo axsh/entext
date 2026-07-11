@@ -157,3 +157,18 @@
 | 5-6（IsSufficient 修正・Phase 2 実行保証） | `go test ./internal/imagetomd/analyzer/... -run GapJudge|Phase2` |
 | 7（中間表の最終転載禁止） | `integration_test.sh --specify "NoPhaseReport|TableFaithful"` |
 | 9-10（007 契約維持・API 同等品質） | `go test ./cmd/image-to-markdown/... ./tests/... -run "RootAPI|ImageToMarkdown"` |
+
+## 実装結果メモ
+
+- **判定**: ✅ 完了（2026-07-11）
+- **変更概要**:
+  - `gap_judge.go`: compat モードで否定パターン（`NOT SUFFICIENT`, `SUFFICIENT ではありません` 等）を先に除外
+  - `quality.go`: `looksLikeExplanatoryReport` / `needsFinalSynthesisRetry` で説明寄り出力を検出し再合成をトリガー
+  - `prompts.go`: 最終統合・再試行プロンプトに原表中心制約、`Phase2ExecuteHint()` 追加
+  - `analyzer.go`: Phase 2 ソフト終了ガード、最終合成リトライを `needsFinalSynthesisRetry` に統合
+  - `tests/testdata/reference_parity/01_変更履歴.md`: 実セル値入り原表中心ゴールデンへ更新
+  - `tests/image_to_markdown_table_faithful_test.go`: 原表忠実度・禁止セクション契約テスト追加
+- **検証結果**:
+  - `./scripts/process/build.sh` → PASS
+  - `./scripts/process/integration_test.sh --specify "TableFaithful|ReferenceParity|NoPhaseReport|ImageToMarkdown|RootAPI"` → PASS（スキップ 0 / 失敗 0）
+- **未実施**: live LLM E2E（計画どおりゴールデン契約テストで代替）
