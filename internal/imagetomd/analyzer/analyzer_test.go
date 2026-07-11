@@ -341,7 +341,7 @@ func (c *recordingClient) SendText(ctx context.Context, sessionID string, prompt
 	return c.queueClient.SendText(ctx, sessionID, prompt)
 }
 
-func TestAnalyzeInjectsCsvHintOnClassifyAndExecuteNotAssess(t *testing.T) {
+func TestAnalyzeInjectsCsvHintOnPhase2Round1Only(t *testing.T) {
 	t.Parallel()
 
 	responses := make([]string, 0, len(DefaultPhases)*3+3)
@@ -364,8 +364,8 @@ func TestAnalyzeInjectsCsvHintOnClassifyAndExecuteNotAssess(t *testing.T) {
 	if len(client.prompts) == 0 {
 		t.Fatalf("expected recorded prompts")
 	}
-	if !strings.Contains(client.prompts[0], "[Reference csv hint]") {
-		t.Fatalf("classify prompt should include csv hint")
+	if strings.Contains(client.prompts[0], "[Reference csv hint]") || strings.Contains(client.prompts[0], "--- CSV content ---") {
+		t.Fatalf("classify prompt must not include csv hint: %s", client.prompts[0])
 	}
 	var assessPrompt string
 	var phase2ExecutePrompt string
@@ -373,8 +373,10 @@ func TestAnalyzeInjectsCsvHintOnClassifyAndExecuteNotAssess(t *testing.T) {
 		if strings.Contains(prompt, "現在は画像解析の Phase") {
 			assessPrompt = prompt
 		}
-		if strings.Contains(prompt, "Phase 2 追加指示") {
-			phase2ExecutePrompt = prompt
+		if strings.Contains(prompt, "Phase 2 追加指示") || strings.Contains(prompt, "| No. | 変更箇所 |") {
+			if strings.Contains(prompt, "CRITICAL: DO NOT PLAN") {
+				phase2ExecutePrompt = prompt
+			}
 		}
 	}
 	if assessPrompt == "" {
@@ -384,10 +386,125 @@ func TestAnalyzeInjectsCsvHintOnClassifyAndExecuteNotAssess(t *testing.T) {
 		t.Fatalf("assess prompt must not include csv hint")
 	}
 	if phase2ExecutePrompt == "" {
-		t.Fatalf("expected phase2 execute prompt with csv append")
+		t.Fatalf("expected phase2 execute prompt")
 	}
-	if !strings.Contains(phase2ExecutePrompt, "上記 CSV から転記してよい") {
-		t.Fatalf("phase2 execute missing csv transfer instruction")
+	if !strings.Contains(phase2ExecutePrompt, "--- CSV content ---") {
+		t.Fatalf("phase2 round1 execute missing scoped csv content")
+	}
+	if !strings.Contains(phase2ExecutePrompt, "可視スコープ外") {
+		t.Fatalf("phase2 execute missing scope constraint")
+	}
+}
+
+func TestAnalyzeClassifyUsesRefOnlyWithoutCsv(t *testing.T) {
+	t.Parallel()
+
+	responses := make([]string, 0, len(DefaultPhases)*3+3)
+	responses = append(responses, "mixed")
+	responses = appendDefaultPhaseResponses(responses, "")
+	responses = append(responses, "# ok\n| No |\n|---|\n| 1 |")
+
+	hints := []csvhint.CsvHint{{Path: "h.csv", Content: "a,b\n1,2"}}
+	client := &recordingClient{queueClient: queueClient{responses: responses}}
+	a := New(client, "codex", "gpt-5.3-codex", AnalyzeOptions{
+		MaxRounds:    1,
+		RoundSleepMS: 0,
+		PhaseSleepMS: 0,
+	})
+
+	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil, hints)
+	if err != nil {
+		t.Fatalf("Analyze failed: %v", err)
+	}
+	for i, prompt := range client.prompts {
+		if i == 0 {
+			continue
+		}
+		if strings.Contains(prompt, "現在は画像解析の Phase 1") && strings.Contains(prompt, "CRITICAL: DO NOT PLAN") {
+			if strings.Contains(prompt, "--- CSV content ---") {
+				t.Fatalf("phase1 execute must not include csv content")
+			}
+		}
+	}
+}
+
+func TestAnalyzePhase2KnownInitializesWithVisibleScope(t *testing.T) {
+	t.Parallel()
+
+	responses := []string{"mixed"}
+	responses = append(responses, "INSUFFICIENT", "q1", phase1Round1AnswerFixture)
+	responses = append(responses, "INSUFFICIENT", "q2", "| No | x |")
+	responses = append(responses, "SUFFICIENT", "SUFFICIENT")
+	responses = append(responses, "# Final\n| 43 |\n| 44 |")
+
+	hints := []csvhint.CsvHint{{Path: "h.csv", Content: "a,b\n1,2"}}
+	client := &recordingClient{queueClient: queueClient{responses: responses}}
+	a := New(client, "codex", "gpt-5.3-codex", AnalyzeOptions{
+		MaxRounds:    1,
+		RoundSleepMS: 0,
+		PhaseSleepMS: 0,
+	})
+
+	_, log, err := a.Analyze(context.Background(), "dummy.png", ".", nil, hints)
+	if err != nil {
+		t.Fatalf("Analyze failed: %v", err)
+	}
+	var phase2 *PhaseLog
+	for i := range log.Phases {
+		if log.Phases[i].PhaseNum == 2 {
+			phase2 = &log.Phases[i]
+			break
+		}
+	}
+	if phase2 == nil || len(phase2.Rounds) == 0 {
+		t.Fatalf("expected phase2 rounds")
+	}
+	known := phase2.Rounds[0].KnownInfo
+	if !strings.Contains(known, "43, 44") && !strings.Contains(known, "43") {
+		t.Fatalf("phase2 known should include visible scope: %s", known)
+	}
+}
+
+func TestAnalyzeAssessKnownDoesNotGrowQuadratically(t *testing.T) {
+	t.Parallel()
+
+	bigAnswer := strings.Repeat("row-data ", 400)
+	responses := []string{"mixed"}
+	responses = append(responses, "INSUFFICIENT", "q1", phase1Round1AnswerFixture)
+	responses = append(responses, "INSUFFICIENT", "q2", bigAnswer)
+	responses = append(responses, "INSUFFICIENT", "q3", "| No | x |")
+	for i := 0; i < 8; i++ {
+		responses = append(responses, "SUFFICIENT")
+	}
+	responses = append(responses, "# Final\nok", "# Final\nok")
+
+	client := &recordingClient{queueClient: queueClient{responses: responses}}
+	a := New(client, "codex", "gpt-5.3-codex", AnalyzeOptions{
+		MaxRounds:    2,
+		RoundSleepMS: 0,
+		PhaseSleepMS: 0,
+	})
+
+	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil, nil)
+	if err != nil {
+		t.Fatalf("Analyze failed: %v", err)
+	}
+	var assessKnown []int
+	for _, prompt := range client.prompts {
+		if strings.Contains(prompt, "現在は画像解析の Phase 1") {
+			if idx := strings.Index(prompt, "---\n"); idx >= 0 {
+				rest := prompt[idx+4:]
+				if end := strings.Index(rest, "\n---"); end >= 0 {
+					assessKnown = append(assessKnown, len(rest[:end]))
+				}
+			}
+		}
+	}
+	if len(assessKnown) < 2 {
+		t.Fatalf("expected multiple phase1 assess prompts, got %d", len(assessKnown))
+	}
+	if assessKnown[1] > maxLatestAnswerInPrompt+2000 {
+		t.Fatalf("known grew quadratically: %v", assessKnown)
 	}
 }
 
@@ -412,8 +529,11 @@ func TestAnalyzeFinalSynthesisIncludesCsvAppendWhenHintsPresent(t *testing.T) {
 		t.Fatalf("Analyze failed: %v", err)
 	}
 	finalPrompt := client.prompts[len(client.prompts)-1]
-	if !strings.Contains(finalPrompt, "CSV 参照により取得したセル値") {
-		t.Fatalf("final synthesis missing csv append: %s", finalPrompt)
+	if !strings.Contains(finalPrompt, "可視スコープ外") {
+		t.Fatalf("final synthesis missing csv scope policy: %s", finalPrompt)
+	}
+	if strings.Contains(finalPrompt, "--- CSV content ---") {
+		t.Fatalf("final synthesis must not embed csv body")
 	}
 }
 

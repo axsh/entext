@@ -1,5 +1,7 @@
 # 011 ImageToMarkdown Excel CSV Hint
 
+> **運用上のスコープ制限**: 012 `ImageToMarkdown-CsvVisibleScope-ContextEfficiency` を参照。012 実装後は CSV 全文の classify 付与は廃止し、出力境界は画像可視スコープ、CSV は Phase 2 execute round 1 のスコープフィルタ抜粋のみに限定される。
+
 ## 背景 (Background)
 
 - `image-to-markdown` は画像（PNG 等）を Vision で読み取り、Markdown へ変換する。セル内の長文・記号・表記ゆれは、画像解像度や書式の影響を受け、転記精度が低下しうる。

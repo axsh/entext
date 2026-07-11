@@ -37,11 +37,13 @@ func (p PhaseLog) HasNonEmptyAnswer() bool {
 }
 
 type RoundLog struct {
-	KnownInfo     string `json:"known_info"`
-	GapAssessment string `json:"gap_assessment"`
-	Sufficient    bool   `json:"sufficient"`
-	Question      string `json:"question"`
-	Answer        string `json:"answer"`
+	KnownInfo        string `json:"known_info,omitempty"`
+	KnownInfoSummary string `json:"known_info_summary,omitempty"`
+	KnownInfoChars   int    `json:"known_info_chars,omitempty"`
+	GapAssessment    string `json:"gap_assessment"`
+	Sufficient       bool   `json:"sufficient"`
+	Question         string `json:"question"`
+	Answer           string `json:"answer"`
 }
 
 func (s *SessionLog) Snapshot(inProgress *PhaseLog) *SessionLog {

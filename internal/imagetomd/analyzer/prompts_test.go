@@ -107,6 +107,34 @@ func TestGenerateQuestionPromptForbidsContentValidation(t *testing.T) {
 	}
 }
 
+func TestPhase2ConversionGapGuide_LimitsSufficientToVisibleScope(t *testing.T) {
+	t.Parallel()
+	got := AssessGapPrompt(DefaultPhases[1], "")
+	for _, want := range []string{
+		"画像可視スコープ内",
+		"CSV フルシート",
+		"可視スコープ外",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in phase2 gap guide", want)
+		}
+	}
+}
+
+func TestGenerateMarkdownPrompt_ExcludesOffImageRows(t *testing.T) {
+	t.Parallel()
+	got := GenerateMarkdownPrompt(nil)
+	for _, want := range []string{
+		"画像可視スコープ外",
+		"可視スコープは Phase 1",
+		"画像可視スコープ内",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in final synthesis prompt", want)
+		}
+	}
+}
+
 func TestAssessGapPromptDoesNotMentionCsvHint(t *testing.T) {
 	t.Parallel()
 	got := AssessGapPrompt(DefaultPhases[1], "INSUFFICIENT")

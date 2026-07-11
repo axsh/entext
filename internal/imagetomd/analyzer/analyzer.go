@@ -21,6 +21,13 @@ type AnalyzeOptions struct {
 	SessionPersist  func(*SessionLog) error
 }
 
+type analyzeContext struct {
+	refs         []refresolver.RefDocument
+	csvHints     []csvhint.CsvHint
+	visibleScope PhaseVisibleScope
+	refContext   string
+}
+
 type Analyzer struct {
 	client tern.Client
 	agent  string
@@ -71,11 +78,13 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 		StartedAt: time.Now().UTC(),
 		Phases:    make([]PhaseLog, 0, len(DefaultPhases)),
 	}
-	refContext := buildRefContext(refs)
-	csvContext := buildCsvHintContext(csvHints)
-	visionContext := refContext + csvContext
+	actx := analyzeContext{
+		refs:       refs,
+		csvHints:   csvHints,
+		refContext: buildRefContext(refs),
+	}
 
-	classResp, err := a.client.SendText(ctx, sessionID, ClassifyPrompt+visionContext+AttachedImageLine(absPath))
+	classResp, err := a.client.SendText(ctx, sessionID, ClassifyPrompt+actx.refContext+AttachedImageLine(absPath))
 	if err != nil {
 		return "", nil, err
 	}
@@ -116,7 +125,7 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 			Goal:      phase.Goal,
 			Rounds:    make([]RoundLog, 0, phase.MaxRounds),
 		}
-		known := ""
+		var lastAnswer string
 		maxRounds := phase.MaxRounds
 		if a.opts.MaxRounds > 0 {
 			maxRounds = a.opts.MaxRounds
@@ -127,7 +136,8 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 			roundStarted := time.Now()
 			a.progressf("step=round_start phase=%d round=%d", phase.Num, roundNum)
 			a.progressf("step=assess_start phase=%d round=%d", phase.Num, roundNum)
-			assessPrompt := AssessGapPrompt(phase, known)
+			promptKnown := buildPromptKnownInfo(actx.visibleScope, lastAnswer, roundNum)
+			assessPrompt := AssessGapPrompt(phase, promptKnown)
 			assessResult, err := a.client.SendText(ctx, sessionID, assessPrompt)
 			if err != nil {
 				return "", nil, err
@@ -135,9 +145,11 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 			sufficient := IsSufficient(assessResult, mode)
 			a.progressf("step=assess_end phase=%d round=%d sufficient=%t", phase.Num, roundNum, sufficient)
 			roundLog := RoundLog{
-				KnownInfo:     known,
-				GapAssessment: assessResult,
-				Sufficient:    sufficient,
+				KnownInfo:        promptKnown,
+				KnownInfoSummary: promptKnown,
+				KnownInfoChars:   len(promptKnown),
+				GapAssessment:    assessResult,
+				Sufficient:       sufficient,
 			}
 			if sufficient {
 				if phase.Num == 2 && !phaseLog.HasNonEmptyAnswer() {
@@ -173,9 +185,16 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 				return "", nil, err
 			}
 			a.progressf("step=execute_start phase=%d round=%d", phase.Num, roundNum)
-			answerPrompt := question + ExecutionQuestionSuffix + visionContext + AttachedImageLine(absPath)
-			if phase.Num == 2 {
-				answerPrompt = question + "\n\n" + Phase2ExecuteHint() + phase2CsvExecuteAppend(csvHints) + ExecutionQuestionSuffix + visionContext + AttachedImageLine(absPath)
+			answerPrompt := question + ExecutionQuestionSuffix + actx.refContext + AttachedImageLine(absPath)
+			if phase.Num == 2 && len(actx.csvHints) > 0 {
+				mode := CsvInjectPathOnly
+				if roundNum == 1 {
+					mode = CsvInjectFullContent
+				}
+				answerPrompt = question + "\n\n" + Phase2ExecuteHint() +
+					buildCsvHintContext(actx.csvHints, mode, actx.visibleScope) +
+					phase2CsvExecuteAppend(actx.csvHints, actx.visibleScope) +
+					ExecutionQuestionSuffix + actx.refContext + AttachedImageLine(absPath)
 			}
 			answer, err := a.client.SendText(ctx, sessionID, answerPrompt)
 			if err != nil {
@@ -191,7 +210,7 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 			default:
 				a.progressf("step=execute_end phase=%d round=%d answer_chars=%d plan_only=false", phase.Num, roundNum, len(answerTrimmed))
 			}
-			known = strings.TrimSpace(known + "\n\n" + answer)
+			lastAnswer = answer
 			phaseLog.Rounds = append(phaseLog.Rounds, roundLog)
 			a.persistSession(log, &phaseLog)
 			a.progressf(
@@ -208,13 +227,17 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 			}
 			// Complex table extraction tends to need additional rounds in phase 3/4.
 			if !extendedForComplexity && (phase.Num == 3 || phase.Num == 4) && round == maxRounds-1 {
-				lowerKnown := strings.ToLower(known)
-				if strings.Contains(lowerKnown, "table") || strings.Contains(known, "表") {
+				lowerKnown := strings.ToLower(lastAnswer)
+				if strings.Contains(lowerKnown, "table") || strings.Contains(lastAnswer, "表") {
 					a.progressf("step=phase_extend phase=%d reason=complex_table extra_rounds=2", phase.Num)
 					maxRounds += 2
 					extendedForComplexity = true
 				}
 			}
+		}
+		if phase.Num == 1 {
+			actx.visibleScope = ExtractVisibleScopeFromPhase1(phaseLog)
+			a.progressf("step=visible_scope_extracted rows=%d cols=%d", len(actx.visibleScope.VisibleRowIDs), actx.visibleScope.ColumnCount)
 		}
 		log.Phases = append(log.Phases, phaseLog)
 		a.persistSession(log, nil)
@@ -232,7 +255,7 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 	}
 
 	a.progressf("step=final_synthesis_start")
-	finalPrompt := GenerateMarkdownPrompt(log.Phases) + csvFinalSynthesisAppend(csvHints)
+	finalPrompt := GenerateMarkdownPrompt(log.Phases) + csvFinalSynthesisAppend(actx.csvHints, actx.visibleScope)
 	markdown, err := a.client.SendText(ctx, sessionID, finalPrompt)
 	if err != nil {
 		return "", nil, err
@@ -240,7 +263,7 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 	a.progressf("step=final_synthesis_end output_chars=%d", len(strings.TrimSpace(markdown)))
 	if retry, reason := needsFinalSynthesisRetry(markdown); retry {
 		a.progressf("step=final_synthesis_retry reason=%s", reason)
-		retryPrompt := GenerateMarkdownRetryPrompt(buildAnswerCorpus(log.Phases)) + csvFinalSynthesisAppend(csvHints)
+		retryPrompt := GenerateMarkdownRetryPrompt(buildAnswerCorpus(log.Phases)) + csvFinalSynthesisAppend(actx.csvHints, actx.visibleScope)
 		markdown, err = a.client.SendText(ctx, sessionID, retryPrompt)
 		if err != nil {
 			return "", nil, err

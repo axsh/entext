@@ -54,8 +54,11 @@ Intermediate phase analysis tables and explanatory report sections (for example 
 CSV hint options for image-to-markdown:
 
 - `--csv-hint <path>` (repeatable): inject Excel-derived cell-value CSV into Vision prompts.
-- `--no-csv-hint-auto`: disable automatic `<image_basename>.csv` lookup beside the image or in adjacent `csv/` directories.
-- When CSV hints are present, table structure still comes from the image (Vision); bulk cell text may be transcribed from CSV.
+- `--no-csv-hint-auto`: disable automatic CSV lookup (basename match, parent `csv/`, or sheet-map resolution).
+- CSV hints supplement **cell text only within the image-visible row scope**; rows present in CSV but not visible in the image must not appear in output Markdown.
+- Full CSV body is attached only on **Phase 2 execute round 1** (scope-filtered excerpt). Classify and Phase 1 execute do not receive CSV content.
+- With `*.sheet-map.json` beside the PDF (`../pdf/` from images) and `../csv/{workbook}.sheet-N.csv`, the matching sheet CSV is auto-selected from the image basename (e.g. `01_変更履歴.png` → `workbook.sheet-1.csv`).
+- When CSV hints are present, table structure (columns, blank rows, nesting layout) still comes from the image (Vision).
 
 Backend selection:
 
