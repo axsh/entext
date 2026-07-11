@@ -5,9 +5,9 @@ default_profile:
 
 providers:
   openai:
-    keys:
+    api_keys:
       - name: default
-        value: vault://providers/openai/default
+        secret: vault://providers/openai/default
         models:
           - name: gpt-4o
           - name: gpt-5.5
@@ -15,15 +15,15 @@ providers:
             mode: responses
 
   anthropic:
-    keys:
+    api_keys:
       - name: default
-        value: vault://providers/anthropic/default
+        secret: vault://providers/anthropic/default
         models:
           - name: claude-sonnet-4-20250514
           - name: claude-opus-4-20250514
 
   ollama:
-    keys:
+    api_keys:
       - name: default
         models:
           - name: qwen2.5-coder:7b
