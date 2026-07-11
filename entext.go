@@ -292,12 +292,24 @@ func ConvertImageToMarkdown(ctx context.Context, job ImageToMarkdownJob, cfg Ima
 		)
 	}
 	client := runtime.Client
+	basename := converter.BasenameFromImage(job.InputPath)
+	targetMD := job.OutputPath
+	if targetMD == "" {
+		targetMD = filepath.Join(job.OutputDir, basename+".md")
+	}
+	sessionDir := filepath.Join(filepath.Dir(targetMD), "_sessions")
+	if err := os.MkdirAll(filepath.Dir(targetMD), 0o755); err != nil {
+		return MarkdownArtifact{}, err
+	}
 	an := analyzer.New(client, cfg.Agent, cfg.Model, analyzer.AnalyzeOptions{
 		StrictGapJudge:  cfg.StrictGapJudge,
 		SaveQuestionLog: cfg.SaveQuestionLog,
 		RoundSleepMS:    cfg.RoundSleepMS,
 		PhaseSleepMS:    cfg.PhaseSleepMS,
 		MaxRounds:       cfg.MaxRounds,
+		SessionPersist: func(log *analyzer.SessionLog) error {
+			return log.Save(sessionDir, basename)
+		},
 		Progress: func(format string, args ...any) {
 			if !cfg.Verbose || cfg.Quiet {
 				return
@@ -310,18 +322,9 @@ func ConvertImageToMarkdown(ctx context.Context, job ImageToMarkdownJob, cfg Ima
 		return MarkdownArtifact{}, wrapError(err)
 	}
 
-	basename := converter.BasenameFromImage(job.InputPath)
-	targetMD := job.OutputPath
-	if targetMD == "" {
-		targetMD = filepath.Join(job.OutputDir, basename+".md")
-	}
-	if err := os.MkdirAll(filepath.Dir(targetMD), 0o755); err != nil {
-		return MarkdownArtifact{}, err
-	}
 	if err := os.WriteFile(targetMD, []byte(md), 0o644); err != nil {
 		return MarkdownArtifact{}, err
 	}
-	sessionDir := filepath.Join(filepath.Dir(targetMD), "_sessions")
 	if err := sessionLog.Save(sessionDir, basename); err != nil {
 		return MarkdownArtifact{}, err
 	}

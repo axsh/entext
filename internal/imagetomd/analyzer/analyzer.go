@@ -17,6 +17,7 @@ type AnalyzeOptions struct {
 	PhaseSleepMS    int
 	MaxRounds       int
 	Progress        func(format string, args ...any)
+	SessionPersist  func(*SessionLog) error
 }
 
 type Analyzer struct {
@@ -78,6 +79,7 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 	category := extractClassification(classResp)
 	a.progressf("step=classify_done category=%s", category)
 	log.Category = category
+	a.persistSession(log, nil)
 
 	if category == "simple_text" {
 		a.progressf("step=simple_text_path")
@@ -89,7 +91,11 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 			return "", nil, ErrEmptyMarkdown
 		}
 		log.ShortPath = true
-		log.CompletedAt = time.Now().UTC()
+		log.Status = "completed"
+		now := time.Now().UTC()
+		log.CompletedAt = now
+		log.LastUpdatedAt = now
+		a.persistSession(log, nil)
 		return md, log, nil
 	}
 
@@ -138,6 +144,7 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 				} else {
 					phaseLog.Rounds = append(phaseLog.Rounds, roundLog)
 					phaseLog.ExitReason = "soft_limit"
+					a.persistSession(log, &phaseLog)
 					a.progressf(
 						"step=round_end phase=%d round=%d sufficient=%t answer_chars=0 elapsed_ms=%d retry_reason=none",
 						phase.Num,
@@ -183,6 +190,7 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 			}
 			known = strings.TrimSpace(known + "\n\n" + answer)
 			phaseLog.Rounds = append(phaseLog.Rounds, roundLog)
+			a.persistSession(log, &phaseLog)
 			a.progressf(
 				"step=round_end phase=%d round=%d sufficient=%t answer_chars=%d elapsed_ms=%d retry_reason=none",
 				phase.Num,
@@ -206,6 +214,7 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 			}
 		}
 		log.Phases = append(log.Phases, phaseLog)
+		a.persistSession(log, nil)
 		a.progressf(
 			"step=phase_end phase=%d phase_name=%s reason=%s elapsed_ms=%d",
 			phase.Num,
@@ -239,7 +248,11 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 		return "", nil, ErrEmptyMarkdown
 	}
 	a.progressf("step=analyze_end output_chars=%d elapsed_ms=%d", len(strings.TrimSpace(markdown)), time.Since(started).Milliseconds())
-	log.CompletedAt = time.Now().UTC()
+	now := time.Now().UTC()
+	log.Status = "completed"
+	log.CompletedAt = now
+	log.LastUpdatedAt = now
+	a.persistSession(log, nil)
 	return markdown, log, nil
 }
 
@@ -315,6 +328,22 @@ func (a *Analyzer) progressf(format string, args ...any) {
 		return
 	}
 	a.opts.Progress(format, args...)
+}
+
+func (a *Analyzer) persistSession(log *SessionLog, inProgress *PhaseLog) {
+	if a == nil || a.opts.SessionPersist == nil || log == nil {
+		return
+	}
+	snap := log.Snapshot(inProgress)
+	if snap.Status == "" {
+		snap.Status = "in_progress"
+	}
+	snap.LastUpdatedAt = time.Now().UTC()
+	if err := a.opts.SessionPersist(snap); err != nil {
+		a.progressf("step=session_persist_error err=%v", err)
+		return
+	}
+	a.progressf("step=session_persist status=%s phases=%d in_progress=%t", snap.Status, len(snap.Phases), inProgress != nil)
 }
 
 func looksLikePlanOnly(text string) bool {

@@ -229,3 +229,42 @@ func TestAnalyzePhase2ContinuesWhenCompatAssessIsNegated(t *testing.T) {
 		t.Fatalf("expected phase=2 round=1 in logs:\n%s", joined)
 	}
 }
+
+func TestAnalyzePersistsSessionIncrementally(t *testing.T) {
+	t.Parallel()
+
+	responses := make([]string, 0, len(DefaultPhases)*3+3)
+	responses = append(responses, "mixed")
+	responses = appendDefaultPhaseResponses(responses, "")
+	responses = append(responses, "# 変更履歴\nok")
+
+	var persistCount int
+	var lastStatus string
+	var lastPhaseCount int
+	client := &queueClient{responses: responses}
+	a := New(client, "codex", "gpt-5.3-codex", AnalyzeOptions{
+		MaxRounds:    1,
+		RoundSleepMS: 0,
+		PhaseSleepMS: 0,
+		SessionPersist: func(log *SessionLog) error {
+			persistCount++
+			lastStatus = log.Status
+			lastPhaseCount = len(log.Phases)
+			return nil
+		},
+	})
+
+	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil)
+	if err != nil {
+		t.Fatalf("Analyze failed: %v", err)
+	}
+	if persistCount < 3 {
+		t.Fatalf("expected multiple persists, got %d", persistCount)
+	}
+	if lastStatus != "completed" {
+		t.Fatalf("last status got %q want completed", lastStatus)
+	}
+	if lastPhaseCount != len(DefaultPhases) {
+		t.Fatalf("last phase count got %d want %d", lastPhaseCount, len(DefaultPhases))
+	}
+}
