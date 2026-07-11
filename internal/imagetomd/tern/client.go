@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	arcticclient "github.com/axsh/arctic-tern/client"
+	arcticclient "github.com/axsh/arctic-tern/client/v1"
 )
 
 type Client interface {
@@ -30,7 +30,10 @@ type ArcticClient struct {
 
 func NewClient(baseURL string) *ArcticClient {
 	return &ArcticClient{
-		client:   arcticclient.New(strings.TrimRight(baseURL, "/")),
+		client: arcticclient.New(
+			strings.TrimRight(baseURL, "/"),
+			arcticclient.WithNoTimeout(),
+		),
 		sessions: make(map[string]*arcticclient.Session),
 	}
 }
@@ -73,7 +76,7 @@ func (c *ArcticClient) SendText(ctx context.Context, sessionID string, text stri
 	if err != nil {
 		return "", err
 	}
-	stream, err := session.SendMessage(ctx, text)
+	stream, err := session.SendText(ctx, text)
 	if err != nil {
 		return "", err
 	}
