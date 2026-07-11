@@ -9,8 +9,10 @@ import (
 
 	"github.com/axsh/entext/internal/common/apperr"
 	"github.com/axsh/entext/internal/exceltopdf"
+	"github.com/axsh/entext/internal/exceltocsv"
 	"github.com/axsh/entext/internal/imagetomd/analyzer"
 	"github.com/axsh/entext/internal/imagetomd/converter"
+	"github.com/axsh/entext/internal/imagetomd/csvhint"
 	"github.com/axsh/entext/internal/imagetomd/refresolver"
 	"github.com/axsh/entext/internal/imagetomd/tern"
 	"github.com/axsh/entext/internal/pdftoimage"
@@ -29,6 +31,11 @@ type FileArtifact struct {
 type ExcelPDFOptions struct {
 	Backend string
 	Engine  string
+	Sheets  string
+}
+
+type ExcelCSVOptions struct {
+	Backend string
 	Sheets  string
 }
 
@@ -55,10 +62,12 @@ type ImageToMarkdownConfig struct {
 }
 
 type ImageToMarkdownJob struct {
-	InputPath   string
-	OutputPath  string
-	OutputDir   string
-	RefPatterns []string
+	InputPath     string
+	OutputPath    string
+	OutputDir     string
+	RefPatterns   []string
+	CsvHintPaths  []string
+	NoCsvHintAuto bool
 }
 
 type MarkdownArtifact struct {
@@ -166,6 +175,32 @@ func ConvertExcelToPDFWithOptions(ctx context.Context, job FileJob, opts ExcelPD
 	return FileArtifact{Paths: []string{out.PDFPath}, SheetMapPath: out.SheetMapPath}, nil
 }
 
+func ConvertExcelToCSV(ctx context.Context, job FileJob) (FileArtifact, error) {
+	return ConvertExcelToCSVWithOptions(ctx, job, ExcelCSVOptions{Backend: exceltocsv.BackendAuto})
+}
+
+func ConvertExcelToCSVWithOptions(ctx context.Context, job FileJob, opts ExcelCSVOptions) (FileArtifact, error) {
+	if job.InputPath == "" {
+		return FileArtifact{}, newValidation("input_path is required")
+	}
+	if job.OutputDir == "" {
+		return FileArtifact{}, newValidation("output_dir is required")
+	}
+	if !isValidExcelBackend(opts.Backend) {
+		return FileArtifact{}, newValidation("excel backend must be auto, libreoffice, or excel-com")
+	}
+	indices, err := exceltocsv.ParseSheetIndices(opts.Sheets)
+	if err != nil {
+		return FileArtifact{}, wrapError(err)
+	}
+	svc := exceltocsv.New()
+	out, err := svc.ConvertWithOptions(ctx, job.InputPath, job.OutputDir, opts.Backend, indices)
+	if err != nil {
+		return FileArtifact{}, wrapError(err)
+	}
+	return FileArtifact{Paths: out.CSVPaths}, nil
+}
+
 func ConvertPDFToImage(ctx context.Context, job FileJob, format string) (FileArtifact, error) {
 	if job.InputPath == "" {
 		return FileArtifact{}, newValidation("input_path is required")
@@ -270,6 +305,10 @@ func ConvertImageToMarkdown(ctx context.Context, job ImageToMarkdownJob, cfg Ima
 	if err != nil {
 		return MarkdownArtifact{}, wrapError(err)
 	}
+	csvHints, err := csvhint.ResolveCsvHints(job.CsvHintPaths, job.InputPath, job.NoCsvHintAuto)
+	if err != nil {
+		return MarkdownArtifact{}, wrapError(err)
+	}
 	runtime, err := tern.BuildRuntime(ctx, tern.RuntimeRequest{
 		Mode:           tern.Mode(cfg.TernMode),
 		ExternalServer: cfg.ServerURL,
@@ -317,7 +356,7 @@ func ConvertImageToMarkdown(ctx context.Context, job ImageToMarkdownJob, cfg Ima
 			_, _ = fmt.Fprintf(os.Stderr, "[image-to-markdown] "+format+"\n", args...)
 		},
 	})
-	md, sessionLog, err := an.Analyze(ctx, job.InputPath, ".", refs)
+	md, sessionLog, err := an.Analyze(ctx, job.InputPath, ".", refs, csvHints)
 	if err != nil {
 		return MarkdownArtifact{}, wrapError(err)
 	}

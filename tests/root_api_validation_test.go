@@ -13,6 +13,7 @@ func TestRootPublicTypesAndFunctionsCompile(t *testing.T) {
 	var _ entext.FileJob
 	var _ entext.FileArtifact
 	var _ entext.ExcelPDFOptions
+	var _ entext.ExcelCSVOptions
 	var _ entext.PDFImageOptions
 	var _ entext.ImageToMarkdownConfig
 

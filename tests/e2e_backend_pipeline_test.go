@@ -398,6 +398,8 @@ func toolCommand(t *testing.T, name string, args ...string) *exec.Cmd {
 	switch name {
 	case "excel-to-pdf":
 		pkg = "./cmd/excel-to-pdf"
+	case "excel-to-csv":
+		pkg = "./cmd/excel-to-csv"
 	case "pdf-to-image":
 		pkg = "./cmd/pdf-to-image"
 	default:
