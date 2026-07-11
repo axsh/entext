@@ -11,6 +11,7 @@
   1. **変換正確性**: 画像に見える文字、行、列、空欄、構造を Markdown に忠実に写すこと。
   2. **内容正確性**: 元の記載内容が相互に整合しているか、業務的・文法的・技術的に正しいかを検証・校正すること。
 - 本仕様では、`image-to-markdown` のギャップ判定を変換正確性の範囲に限定し、内容正確性の検証を明示的にスコープ外とする。
+- 加えて、現行の `AssessGapPrompt` は「充足時に `SUFFICIENT` を含める」ことだけを規定しており、不充足時の出力形式は未定義である。その結果、セッションログでは `不足しています`、`不十分です`、`NOT SUFFICIENT`、`SUFFICIENT ではありません` など表記揺れが発生し、Go 側の `IsSufficient` が否定パターンの列挙と部分文字列マッチで後追い対応している。判定の二値（充足 / 不充足）を LLM 出力とパーサーの双方で固定する必要がある。
 
 ## 要件 (Requirements)
 
@@ -52,6 +53,19 @@
     - 入れ子内容の展開
 11. 最終 Markdown に、元画像には存在しない校正表、内容整合性評価、`SymbolEvidence` 列、転記比較レポートを出力しないこと。
 12. CLI `image-to-markdown` と公開 API `ConvertImageToMarkdown` で同じギャップ判定を使用すること。
+13. 全 Phase のギャップ判定出力は、**充足 / 不充足の二値**とし、次のいずれか一方のみを判定語として用いること。
+    - 充足: `SUFFICIENT`
+    - 不充足: `INSUFFICIENT`
+    不足理由や補足説明は、この判定語の前後に記述してよいが、`SUFFICIENT` と `INSUFFICIENT` を同一回答内で混在させてはならない。
+14. `AssessGapPrompt` は、上記二値出力を義務付けること。現行の「充足時に `SUFFICIENT` を含める」だけの規定を置き換え、不充足時は必ず `INSUFFICIENT` を出力するよう明示すること。`不足しています`、`不十分`、`NOT SUFFICIENT`、`SUFFICIENT ではありません` などの代替表現は禁止する。
+15. `IsSufficient`（および将来の gap 判定パーサー）は、文字列マッチングを次の順序で行うこと。
+    1. **`INSUFFICIENT` を先に判定**する（`INSUFFICIENT` は `SUFFICIENT` を部分文字列として含むため）。
+    2. 次に **`SUFFICIENT` を判定**する。
+    3. どちらも検出できない場合は **不充足（`false`）としてフォールバック**し、追加読取ラウンドを継続する。判定不能を充足と誤認してはならない。
+    - `compat` モード: 大文字小文字を無視した部分一致でよいが、判定順序 1→2→3 は厳守する。
+    - `strict` モード: `^SUFFICIENT$` / `^INSUFFICIENT$`、または `Decision: SUFFICIENT` / `Decision: INSUFFICIENT` の行単位一致のみを真とする。
+    - 移行期間中、`NOT SUFFICIENT`、`NOT_SUFFICIENT`、`SUFFICIENT ではありません` 等のレガシー否定表現は `INSUFFICIENT` と同等に不充足として扱ってよい。
+16. セッションログの `sufficient` フィールドは、上記パーサー結果と一致すること。`gap_assessment` に `INSUFFICIENT` が含まれるのに `sufficient: true` となる誤判定を再発させないこと。
 
 ### 任意要件
 
@@ -82,11 +96,18 @@
 内容の校正や意味的整合性の評価をせず、画像どおりに Markdown へ再現できる情報として記録する。
 ```
 
-### 3. ギャップ判定プロンプトの境界追加
+### 3. ギャップ判定プロンプトの境界追加と二値出力
 
-`AssessGapPrompt` に変換境界を追加する。
+`AssessGapPrompt` に変換境界と二値出力形式を追加する。現行の「充足時に `SUFFICIENT` を含める」規定は削除する。
 
 ```text
+判定結果は、必ず次のいずれか一方を回答に含めてください（混在禁止）:
+- 充足: SUFFICIENT
+- 不充足: INSUFFICIENT
+
+不足理由や補足説明は、この判定語の前後に簡潔に記述してよいです。
+「不足しています」「不十分」「NOT SUFFICIENT」等の代替表現は使わないでください。
+
 この判定は画像から Markdown への変換に必要な情報の充足だけを対象とします。
 元画像の記載内容について、誤字、表記ゆれ、意味的矛盾、URL・正規表現の妥当性を
 校正または評価してはなりません。画像に記載されているなら、そのまま転記できていることを
@@ -99,7 +120,33 @@
 - 既存回答間の差異ではなく、元画像に対して未取得の行・列・セル・入れ子情報があるかを問う。
 - すでに原表全体が一つ以上の回答に含まれている場合は、追加校正を求めず `SUFFICIENT` を返せるようにする。
 
-### 5. 現行品質の維持
+### 5. ギャップ判定パーサーの二値化
+
+`internal/imagetomd/analyzer/gap_judge.go` の `IsSufficient` を、否定パターン列挙＋`SUFFICIENT` 部分一致依存から、明示的な二値判定へ変更する。
+
+判定順序（`compat` / `strict` 共通の原則）:
+
+```
+1. INSUFFICIENT を検出 → false（不充足）
+2. SUFFICIENT を検出   → true（充足）
+3. どちらも未検出     → false（不充足フォールバック、ラウンド継続）
+```
+
+`compat` モードの検出例:
+
+- `INSUFFICIENT` → false（`SUFFICIENT` 部分一致より先に評価）
+- `判定: INSUFFICIENT\n不足: 列見出し` → false
+- `SUFFICIENT` → true
+- `判定: SUFFICIENT\n補足あり` → true
+- `不足しています`（レガシー、移行期のみ）→ レガシー否定パターンで false
+- 判定語なし → false（フォールバック）
+
+`strict` モードの検出例:
+
+- 行単位 `SUFFICIENT` / `INSUFFICIENT`、または `Decision: SUFFICIENT` / `Decision: INSUFFICIENT` のみ真
+- `NOT SUFFICIENT` は strict では不充足（行完全一致しないため）
+
+### 6. 現行品質の維持
 
 - `008-ImageToMarkdown-TableFaithfulOutput` の原表中心制約、説明レポート検出、Phase 2 実行保証は維持する。
 - 本仕様は読み取り精度を下げるものではない。
@@ -132,25 +179,42 @@
    2. 9 列表、No.43/44、氏名、日付、変更内容、空欄行、入れ子展開が保持される。
    3. Phase レポート、校正表、内容整合性評価が含まれない。
 
+5. **ギャップ判定の二値出力とパース**
+   1. モック `gap_assessment` が `INSUFFICIENT` のみのとき `sufficient: false` となる。
+   2. `INSUFFICIENT` を含む文字列が `SUFFICIENT` 部分一致で `sufficient: true` にならない。
+   3. `SUFFICIENT` のみのとき `sufficient: true` となる。
+   4. 判定語がない曖昧な回答は `sufficient: false`（フォールバック）となる。
+   5. `AssessGapPrompt` に `SUFFICIENT` / `INSUFFICIENT` の二値義務と代替表現禁止が含まれる。
+
 ## テスト項目 (Testing for the Requirements)
 
 ### 単体テスト
 
-1. `AssessGapPrompt` の変換境界:
+1. `AssessGapPrompt` の変換境界と二値出力:
    - 「内容の校正・意味的整合性・妥当性は対象外」
    - 「画像どおり転記できれば充足」
    - 「未取得の行・列・セルは不足」
+   - 「充足: SUFFICIENT / 不充足: INSUFFICIENT（混在禁止）」
+   - 「不足しています」「NOT SUFFICIENT」等の代替表現禁止
    を示す文言が含まれること。
 
-2. Phase 2 Goal:
+2. `IsSufficient` 二値パース（`gap_judge_test.go` / `quality_test.go`）:
+   - `INSUFFICIENT` → false
+   - `INSUFFICIENT\n補足` → false（`SUFFICIENT` 部分一致より優先）
+   - `SUFFICIENT` → true
+   - 判定語なし → false（フォールバック）
+   - strict: `NOT SUFFICIENT` → false、`SUFFICIENT` 行 → true
+   - compat 移行期: `NOT SUFFICIENT` / `SUFFICIENT ではありません` → false
+
+3. Phase 2 Goal:
    - 画像との転記忠実度を要求すること。
    - 内容校正を禁止すること。
 
-3. モックギャップ判定:
+4. モックギャップ判定:
    - 原表が揃った回答に、元データ上の表記ゆれや疑わしい URL が含まれても追加校正を要求しないこと。
    - 行またはセルが欠落した回答は不足と判定すること。
 
-4. 質問生成:
+5. 質問生成:
    - `SymbolEvidence`、内容整合性、URL 妥当性、正規表現検証を要求しないこと。
    - 不足時は画像上の未取得データのみを質問すること。
 
@@ -168,7 +232,7 @@
 
 3. Phase 2 スコープ契約:
    ```bash
-   go test ./internal/imagetomd/analyzer/... -run "Phase2|GapPrompt|ConversionScope" -count=1
+   go test ./internal/imagetomd/analyzer/... -run "Phase2|GapPrompt|ConversionScope|GapJudge|IsSufficient" -count=1
    ```
 
 ### ビルド・全体検証
@@ -190,6 +254,9 @@
 | 10 現行原表品質の維持 | `TableFaithful|ReferenceParity` |
 | 11 校正レポート非出力 | 禁止トークン統合テスト |
 | 12 CLI/API 同一挙動 | `ImageToMarkdown|RootAPI` |
+| 13-14 二値出力（SUFFICIENT / INSUFFICIENT） | `AssessGapPrompt` 契約テスト |
+| 15 パーサー判定順序とフォールバック | `GapJudge|IsSufficient` 単体テスト |
+| 16 `sufficient` フィールド整合 | analyzer モック統合テスト |
 
 ## 非目標 (Non-Goals)
 
