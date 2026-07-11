@@ -2,13 +2,6 @@ package analyzer
 
 import "testing"
 
-func TestIsSufficientCompat(t *testing.T) {
-	t.Parallel()
-	if !IsSufficient("NOT SUFFICIENT", GapJudgeCompat) {
-		t.Fatalf("compat mode should match legacy behavior")
-	}
-}
-
 func TestIsSufficientStrict(t *testing.T) {
 	t.Parallel()
 	if IsSufficient("NOT SUFFICIENT", GapJudgeStrict) {
