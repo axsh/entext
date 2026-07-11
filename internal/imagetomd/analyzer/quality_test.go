@@ -14,6 +14,8 @@ func TestIsSufficientCompatRejectsJapaneseNegation(t *testing.T) {
 		{name: "japanese negation", in: "SUFFICIENT ではありません", want: false},
 		{name: "english negation", in: "NOT SUFFICIENT", want: false},
 		{name: "insufficient keyword", in: "INSUFFICIENT", want: false},
+		{name: "insufficient with note", in: "判定: INSUFFICIENT\n不足: 行", want: false},
+		{name: "fallback ambiguous", in: "不足しています。列見出しが未取得", want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

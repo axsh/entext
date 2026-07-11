@@ -12,18 +12,25 @@ const (
 	GapJudgeStrict GapJudgeMode = "strict"
 )
 
-var strictSufficientLine = regexp.MustCompile(`(?m)^\s*SUFFICIENT\s*$`)
-var strictDecisionLine = regexp.MustCompile(`(?mi)^\s*Decision\s*:\s*SUFFICIENT\s*$`)
+var (
+	strictSufficientLine       = regexp.MustCompile(`(?m)^\s*SUFFICIENT\s*$`)
+	strictInsufficientLine   = regexp.MustCompile(`(?m)^\s*INSUFFICIENT\s*$`)
+	strictDecisionSufficient   = regexp.MustCompile(`(?mi)^\s*Decision\s*:\s*SUFFICIENT\s*$`)
+	strictDecisionInsufficient = regexp.MustCompile(`(?mi)^\s*Decision\s*:\s*INSUFFICIENT\s*$`)
 
-var compatNegativePatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)NOT\s+SUFFICIENT`),
-	regexp.MustCompile(`SUFFICIENT\s*ではありません`),
-	regexp.MustCompile(`(?i)INSUFFICIENT`),
-	regexp.MustCompile(`(?i)NOT_SUFFICIENT`),
-}
+	compatInsufficientToken = regexp.MustCompile(`(?i)INSUFFICIENT`)
+	compatLegacyNegativePatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)NOT\s+SUFFICIENT`),
+		regexp.MustCompile(`SUFFICIENT\s*ではありません`),
+		regexp.MustCompile(`(?i)NOT_SUFFICIENT`),
+	}
+)
 
-func isCompatNegativeSufficient(resp string) bool {
-	for _, p := range compatNegativePatterns {
+func isCompatInsufficient(resp string) bool {
+	if compatInsufficientToken.MatchString(resp) {
+		return true
+	}
+	for _, p := range compatLegacyNegativePatterns {
 		if p.MatchString(resp) {
 			return true
 		}
@@ -31,14 +38,34 @@ func isCompatNegativeSufficient(resp string) bool {
 	return false
 }
 
+func isCompatSufficient(resp string) bool {
+	return strings.Contains(strings.ToUpper(resp), "SUFFICIENT")
+}
+
+func isStrictInsufficient(resp string) bool {
+	return strictInsufficientLine.MatchString(resp) ||
+		strictDecisionInsufficient.MatchString(resp)
+}
+
+func isStrictSufficient(resp string) bool {
+	return strictSufficientLine.MatchString(resp) ||
+		strictDecisionSufficient.MatchString(resp)
+}
+
 func IsSufficient(resp string, mode GapJudgeMode) bool {
 	switch mode {
 	case GapJudgeStrict:
-		return strictSufficientLine.MatchString(resp) || strictDecisionLine.MatchString(resp)
-	default:
-		if isCompatNegativeSufficient(resp) {
+		if isStrictInsufficient(resp) {
 			return false
 		}
-		return strings.Contains(strings.ToUpper(resp), "SUFFICIENT")
+		return isStrictSufficient(resp)
+	default:
+		if isCompatInsufficient(resp) {
+			return false
+		}
+		if isCompatSufficient(resp) {
+			return true
+		}
+		return false
 	}
 }

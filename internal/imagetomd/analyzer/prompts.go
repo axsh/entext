@@ -34,47 +34,74 @@ var DefaultPhases = []Phase{
 		MaxRounds: 5,
 	},
 	{
-		Num:       2,
-		Name:      "データの網羅的な読み取り",
-		Goal:      "テーブルの場合は、全行・全列のデータを1つも漏らさず読み取り、表形式で記録する。図解の場合は、含まれるテキスト・ラベル・接続関係をすべて抽出する。読み取りの正確性を最優先とし、要約や解釈は行わない。",
+		Num: 2,
+		Name: "データの網羅的な読み取り",
+		Goal: "テーブルの場合は、画像に見える全行・全列・セル値・空欄・入れ子内容を、" +
+			"内容の校正や意味的整合性の評価をせず、画像どおりに Markdown へ再現できる情報として記録する。" +
+			"図解の場合は、含まれるテキスト・ラベル・接続関係をすべて抽出する。" +
+			"読み取りの正確性は画像との転記忠実度を意味し、要約や解釈は行わない。",
 		MaxRounds: 5,
 	},
 	{
-		Num:       3,
-		Name:      "構造関係の解析",
-		Goal:      "要素間の関係性（順序、依存、階層）を解析する。テーブルの場合は、セクション帯による行のグルーピング、親子関係、入れ子構造を定義する。図の場合はフロー・接続関係を定義する。",
+		Num: 3,
+		Name: "構造関係の解析",
+		Goal: "要素間の関係性（順序、依存、階層）を解析する。テーブルの場合は、セクション帯による行のグルーピング、親子関係、入れ子構造を定義する。" +
+			"図の場合はフロー・接続関係を定義する。" +
+			"本 Phase の分析は画像から Markdown への変換再現に従属する。元データの意味的整合性の評価や修正提案は行わない。",
 		MaxRounds: 5,
 	},
 	{
-		Num:       4,
-		Name:      "暗黙知の言語化",
-		Goal:      "視覚的な配置や書式（色、注記、結合）が暗黙的に示す情報を抽出する。テーブルの場合は、セルの背景色、文字色（赤字・青字）、注記記号（★等）の意味を記録する。不足しているデータ行がないか最終確認する。",
+		Num: 4,
+		Name: "暗黙知の言語化",
+		Goal: "視覚的な配置や書式（色、注記、結合）が暗黙的に示す情報を抽出する。テーブルの場合は、セルの背景色、文字色（赤字・青字）、注記記号（★等）の意味を記録する。" +
+			"不足しているデータ行がないか最終確認する。" +
+			"本 Phase の分析は画像から Markdown への変換再現に従属する。元データの意味的整合性の評価や修正提案は行わない。",
 		MaxRounds: 5,
 	},
 }
+
+const gapJudgmentBinaryOutput = `
+判定結果は、必ず次のいずれか一方を回答に含めてください（混在禁止）:
+- 充足: SUFFICIENT
+- 不充足: INSUFFICIENT
+
+不足理由や補足説明は、この判定語の前後に簡潔に記述してよいです。
+「不足しています」「不十分」「NOT SUFFICIENT」等の代替表現は使わないでください。`
+
+const conversionScopeBoundary = `
+この判定は画像から Markdown への変換に必要な情報の充足だけを対象とします。
+元画像の記載内容について、誤字、表記ゆれ、意味的矛盾、URL・正規表現の妥当性を
+校正または評価してはなりません。画像に記載されているなら、そのまま転記できていることを
+充足条件としてください。
+不足理由は「画像上の未取得の行・列・セル・入れ子情報」など、画像と出力候補の対応関係として述べてください。`
+
+const phase2ConversionGapGuide = `
+Phase 2 追加ガイド:
+- 複数ラウンドの回答間の字形差（[ ]/【】、〇/○、＜＞/〈〉、-/− 等）だけを理由に INSUFFICIENT にしない。
+- 原表全体（列見出し・データ行・空欄行・入れ子内容）が取得済みなら SUFFICIENT とする。
+- SymbolEvidence、内容整合性、URL・正規表現の妥当性検証を不足理由にしない。`
 
 func AttachedImageLine(absPath string) string {
 	return fmt.Sprintf("\n\n[Attached image: %s]", absPath)
 }
 
 func AssessGapPrompt(phase Phase, knownInfo string) string {
-	return fmt.Sprintf(`現在は画像解析の Phase %d: [%s] を実施しています。
+	var b strings.Builder
+	fmt.Fprintf(&b, `現在は画像解析の Phase %d: [%s] を実施しています。
 この Phase の目的は「%s」です。
 
 これまでに対話で判明している情報は以下の通りです：
 ---
 %s
 ---
-
-上記の情報を元に、Phase の目的を達成するのに十分な情報が集まったか判定してください。
-もし不足している情報がある場合は、何が不足しているかを具体的に述べてください。
-十分な情報が集まった場合は、回答の中に必ず "SUFFICIENT" という単語を含めてください。
-回答は簡潔に行い、前置き（「はい、承知しました」等）は不要です。`,
-		phase.Num,
-		phase.Name,
-		phase.Goal,
-		knownInfo,
-	)
+`, phase.Num, phase.Name, phase.Goal, knownInfo)
+	b.WriteString(gapJudgmentBinaryOutput)
+	b.WriteString(conversionScopeBoundary)
+	if phase.Num == 2 {
+		b.WriteString(phase2ConversionGapGuide)
+	}
+	b.WriteString("\n回答は簡潔に行い、前置き（「はい、承知しました」等）は不要です。")
+	return b.String()
 }
 
 func GenerateQuestionPrompt(phase Phase, gapAssessment string) string {
@@ -91,7 +118,9 @@ func GenerateQuestionPrompt(phase Phase, gapAssessment string) string {
 3. 回答の開始文字を指定してください。例：「『| 要素ID |』から書き始めてください」や「『- 要素1:』から書き始めてください」。
 4. 「承知しました」「確認します」などの会話的な応答を一切禁止することを明記してください。
 5. 外部ツール（OCR, tesseract, shell等）の使用を禁止し、自身の視覚能力（Vision）のみで即答するよう指示に含めてください。
-6. 質問文のみを出力してください。`,
+6. 質問文のみを出力してください。
+7. 次を質問に含めてはならない: SymbolEvidence、内容整合性評価、URL/正規表現の妥当性検証、表記ゆれの統一、複数転記結果の校正統合、行・列番号付き「最終確定版」の作成要求。
+8. 不足時は画像上の未取得データ（行・列・セル・入れ子）のみを対象とする。`,
 		phase.Num,
 		phase.Name,
 		gapAssessment,

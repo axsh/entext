@@ -47,6 +47,7 @@ Image-to-markdown tern runtime options:
 - `inproc` boots `github.com/axsh/arctic-tern/server` in the same process.
 
 `image-to-markdown` final output is table-faithful Markdown centered on the source table from the image.
+Gap judgment is limited to conversion fidelity (faithful transcription from the image) and uses a binary verdict: `SUFFICIENT` or `INSUFFICIENT`.
 Intermediate phase analysis tables and explanatory report sections (for example element inventories or interpretation tables) are not included in the delivered document.
 
 Backend selection:

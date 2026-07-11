@@ -230,6 +230,67 @@ func TestAnalyzePhase2ContinuesWhenCompatAssessIsNegated(t *testing.T) {
 	}
 }
 
+func TestAnalyzeMapsInsufficientAssessmentToSufficientFalse(t *testing.T) {
+	t.Parallel()
+
+	responses := make([]string, 0, len(DefaultPhases)*3+3)
+	responses = append(responses, "mixed")
+	responses = appendDefaultPhaseResponses(responses, "INSUFFICIENT\n未取得: 列見出し")
+	responses = append(responses, "# 変更履歴\nok")
+
+	var logs []string
+	client := &queueClient{responses: responses}
+	a := New(client, "codex", "gpt-5.3-codex", AnalyzeOptions{
+		MaxRounds:    1,
+		RoundSleepMS: 0,
+		PhaseSleepMS: 0,
+		Progress: func(format string, args ...any) {
+			logs = append(logs, strings.TrimSpace(fmt.Sprintf(format, args...)))
+		},
+	})
+
+	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil)
+	if err != nil {
+		t.Fatalf("Analyze failed: %v", err)
+	}
+	joined := strings.Join(logs, "\n")
+	if !strings.Contains(joined, "phase=2 round=1 sufficient=false") {
+		t.Fatalf("expected phase=2 assess insufficient=false in logs:\n%s", joined)
+	}
+}
+
+func TestAnalyzePhase2ContinuesWhenAssessIsInsufficientToken(t *testing.T) {
+	t.Parallel()
+
+	responses := make([]string, 0, len(DefaultPhases)*3+3)
+	responses = append(responses, "mixed")
+	responses = appendDefaultPhaseResponses(responses, "INSUFFICIENT\n未取得: 行3")
+	responses = append(responses, "# 変更履歴\nok")
+
+	var logs []string
+	client := &queueClient{responses: responses}
+	a := New(client, "codex", "gpt-5.3-codex", AnalyzeOptions{
+		MaxRounds:    1,
+		RoundSleepMS: 0,
+		PhaseSleepMS: 0,
+		Progress: func(format string, args ...any) {
+			logs = append(logs, strings.TrimSpace(fmt.Sprintf(format, args...)))
+		},
+	})
+
+	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil)
+	if err != nil {
+		t.Fatalf("Analyze failed: %v", err)
+	}
+	joined := strings.Join(logs, "\n")
+	if strings.Contains(joined, "step=phase2_guard") {
+		t.Fatalf("phase2 guard should not run when assess is INSUFFICIENT:\n%s", joined)
+	}
+	if !strings.Contains(joined, "phase=2 round=1") {
+		t.Fatalf("expected phase=2 round=1 in logs:\n%s", joined)
+	}
+}
+
 func TestAnalyzePersistsSessionIncrementally(t *testing.T) {
 	t.Parallel()
 
