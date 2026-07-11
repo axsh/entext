@@ -40,14 +40,26 @@ func (c *queueClient) TerminateSession(context.Context, string) error {
 	return nil
 }
 
+func appendDefaultPhaseResponses(responses []string, phase2Assess string) []string {
+	for _, phase := range DefaultPhases {
+		assess := "SUFFICIENT"
+		if phase.Num == 2 && phase2Assess != "" {
+			assess = phase2Assess
+		}
+		responses = append(responses, assess)
+		if phase.Num == 2 {
+			responses = append(responses, "phase2 question", "| No. | 変更箇所 |\n|---|---|\n| 43 | x |")
+		}
+	}
+	return responses
+}
+
 func TestAnalyzeRetriesWhenFinalLooksLikePhaseReport(t *testing.T) {
 	t.Parallel()
 
-	responses := make([]string, 0, len(DefaultPhases)+3)
+	responses := make([]string, 0, len(DefaultPhases)*3+3)
 	responses = append(responses, "mixed")
-	for range DefaultPhases {
-		responses = append(responses, "SUFFICIENT")
-	}
+	responses = appendDefaultPhaseResponses(responses, "")
 	responses = append(responses, "### Phase 1\nQ: q\nA: a")
 	responses = append(responses, "# Final\n\n| Col |\n|---|\n| v |")
 
@@ -70,11 +82,9 @@ func TestAnalyzeRetriesWhenFinalLooksLikePhaseReport(t *testing.T) {
 func TestAnalyzeReturnsEmptyMarkdownErrorWhenRetryStillInvalid(t *testing.T) {
 	t.Parallel()
 
-	responses := make([]string, 0, len(DefaultPhases)+3)
+	responses := make([]string, 0, len(DefaultPhases)*3+3)
 	responses = append(responses, "mixed")
-	for range DefaultPhases {
-		responses = append(responses, "SUFFICIENT")
-	}
+	responses = appendDefaultPhaseResponses(responses, "")
 	responses = append(responses, "### Phase 1\nQ: q\nA: a")
 	responses = append(responses, "### Phase 2\nQ: q\nA: a")
 
@@ -94,11 +104,9 @@ func TestAnalyzeReturnsEmptyMarkdownErrorWhenRetryStillInvalid(t *testing.T) {
 func TestAnalyzeProgressContainsPhaseRoundAndRetryFields(t *testing.T) {
 	t.Parallel()
 
-	responses := make([]string, 0, len(DefaultPhases)+3)
+	responses := make([]string, 0, len(DefaultPhases)*3+3)
 	responses = append(responses, "mixed")
-	for range DefaultPhases {
-		responses = append(responses, "SUFFICIENT")
-	}
+	responses = appendDefaultPhaseResponses(responses, "")
 	responses = append(responses, "")
 	responses = append(responses, "# Final\nok")
 
@@ -130,5 +138,94 @@ func TestAnalyzeProgressContainsPhaseRoundAndRetryFields(t *testing.T) {
 		if !strings.Contains(joined, token) {
 			t.Fatalf("missing progress token %q in logs:\n%s", token, joined)
 		}
+	}
+}
+
+func TestAnalyzeRetriesWhenFinalLooksLikeExplanatoryReport(t *testing.T) {
+	t.Parallel()
+
+	responses := make([]string, 0, len(DefaultPhases)*3+3)
+	responses = append(responses, "mixed")
+	responses = appendDefaultPhaseResponses(responses, "")
+	responses = append(responses, "## 要素一覧（Phase 1）\n| 要素ID |")
+	responses = append(responses, "# 変更履歴\n\n| No. | 変更箇所 |\n|---|---|\n| 43 | x |")
+
+	client := &queueClient{responses: responses}
+	a := New(client, "codex", "gpt-5.3-codex", AnalyzeOptions{
+		MaxRounds:    1,
+		RoundSleepMS: 0,
+		PhaseSleepMS: 0,
+	})
+
+	md, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil)
+	if err != nil {
+		t.Fatalf("Analyze failed: %v", err)
+	}
+	if !strings.Contains(md, "| No. |") {
+		t.Fatalf("retry markdown was not returned: %s", md)
+	}
+}
+
+func TestAnalyzePhase2RequiresNonEmptyAnswerBeforeSoftLimit(t *testing.T) {
+	t.Parallel()
+
+	responses := make([]string, 0, len(DefaultPhases)*3+3)
+	responses = append(responses, "mixed")
+	responses = appendDefaultPhaseResponses(responses, "")
+	responses = append(responses, "# 変更履歴\nok")
+
+	var logs []string
+	client := &queueClient{responses: responses}
+	a := New(client, "codex", "gpt-5.3-codex", AnalyzeOptions{
+		MaxRounds:    1,
+		RoundSleepMS: 0,
+		PhaseSleepMS: 0,
+		Progress: func(format string, args ...any) {
+			logs = append(logs, strings.TrimSpace(fmt.Sprintf(format, args...)))
+		},
+	})
+
+	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil)
+	if err != nil {
+		t.Fatalf("Analyze failed: %v", err)
+	}
+	joined := strings.Join(logs, "\n")
+	if !strings.Contains(joined, "step=phase2_guard") {
+		t.Fatalf("expected phase2 guard in logs:\n%s", joined)
+	}
+	if !strings.Contains(joined, "phase=2 round=1") {
+		t.Fatalf("expected phase=2 round=1 in logs:\n%s", joined)
+	}
+}
+
+func TestAnalyzePhase2ContinuesWhenCompatAssessIsNegated(t *testing.T) {
+	t.Parallel()
+
+	responses := make([]string, 0, len(DefaultPhases)*3+3)
+	responses = append(responses, "mixed")
+	responses = appendDefaultPhaseResponses(responses, "SUFFICIENT ではありません")
+	responses = append(responses, "# 変更履歴\nok")
+
+	var logs []string
+	client := &queueClient{responses: responses}
+	a := New(client, "codex", "gpt-5.3-codex", AnalyzeOptions{
+		MaxRounds:    1,
+		RoundSleepMS: 0,
+		PhaseSleepMS: 0,
+		Progress: func(format string, args ...any) {
+			logs = append(logs, strings.TrimSpace(fmt.Sprintf(format, args...)))
+		},
+	})
+
+	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil)
+	if err != nil {
+		t.Fatalf("Analyze failed: %v", err)
+	}
+	joined := strings.Join(logs, "\n")
+	if strings.Contains(joined, "step=phase2_guard") {
+		t.Fatalf("phase2 guard should not run when assess is negated:\n%s", joined)
+	}
+	if !strings.Contains(joined, "phase=2 round=1") {
+		t.Fatalf("expected phase=2 round=1 in logs:\n%s", joined)
 	}
 }

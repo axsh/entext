@@ -64,13 +64,25 @@ func TestBuildAnswerCorpusReturnsEmptyWhenNoUsefulAnswers(t *testing.T) {
 	}
 }
 
-func TestLooksLikePhaseReport(t *testing.T) {
+func TestNeedsFinalSynthesisRetryReasons(t *testing.T) {
 	t.Parallel()
-
-	if !looksLikePhaseReport("### Phase 1: Overview\nQ: aaa\nA: bbb") {
-		t.Fatalf("phase report should be detected")
+	cases := []struct {
+		name   string
+		in     string
+		retry  bool
+		reason string
+	}{
+		{name: "empty", in: "   ", retry: true, reason: "empty"},
+		{name: "phase report", in: "### Phase 1\nQ: q\nA: a", retry: true, reason: "phase_report"},
+		{name: "explanatory report", in: "## 要素一覧（Phase 1）\n| 要素ID |", retry: true, reason: "explanatory_report"},
+		{name: "faithful table", in: "# 変更履歴\n\n| No. | 変更箇所 |", retry: false, reason: ""},
 	}
-	if looksLikePhaseReport("# Final Markdown\n| a | b |") {
-		t.Fatalf("normal markdown should not be detected as phase report")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			retry, reason := needsFinalSynthesisRetry(tc.in)
+			if retry != tc.retry || reason != tc.reason {
+				t.Fatalf("got retry=%v reason=%q want retry=%v reason=%q", retry, reason, tc.retry, tc.reason)
+			}
+		})
 	}
 }

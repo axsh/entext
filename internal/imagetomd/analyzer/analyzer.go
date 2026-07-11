@@ -131,16 +131,22 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 				Sufficient:    sufficient,
 			}
 			if sufficient {
-				phaseLog.Rounds = append(phaseLog.Rounds, roundLog)
-				phaseLog.ExitReason = "soft_limit"
-				a.progressf(
-					"step=round_end phase=%d round=%d sufficient=%t answer_chars=0 elapsed_ms=%d retry_reason=none",
-					phase.Num,
-					roundNum,
-					sufficient,
-					time.Since(roundStarted).Milliseconds(),
-				)
-				break
+				if phase.Num == 2 && !phaseLog.HasNonEmptyAnswer() {
+					a.progressf("step=phase2_guard reason=no_answer_before_soft_limit")
+					sufficient = false
+					roundLog.Sufficient = false
+				} else {
+					phaseLog.Rounds = append(phaseLog.Rounds, roundLog)
+					phaseLog.ExitReason = "soft_limit"
+					a.progressf(
+						"step=round_end phase=%d round=%d sufficient=%t answer_chars=0 elapsed_ms=%d retry_reason=none",
+						phase.Num,
+						roundNum,
+						sufficient,
+						time.Since(roundStarted).Milliseconds(),
+					)
+					break
+				}
 			}
 
 			a.progressf("step=generate_question_start phase=%d round=%d", phase.Num, roundNum)
@@ -158,6 +164,9 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 			}
 			a.progressf("step=execute_start phase=%d round=%d", phase.Num, roundNum)
 			answerPrompt := question + ExecutionQuestionSuffix + refContext + AttachedImageLine(absPath)
+			if phase.Num == 2 {
+				answerPrompt = question + "\n\n" + Phase2ExecuteHint() + ExecutionQuestionSuffix + refContext + AttachedImageLine(absPath)
+			}
 			answer, err := a.client.SendText(ctx, sessionID, answerPrompt)
 			if err != nil {
 				return "", nil, err
@@ -217,11 +226,7 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 		return "", nil, err
 	}
 	a.progressf("step=final_synthesis_end output_chars=%d", len(strings.TrimSpace(markdown)))
-	if strings.TrimSpace(markdown) == "" || looksLikePhaseReport(markdown) {
-		reason := "empty"
-		if looksLikePhaseReport(markdown) {
-			reason = "phase_report"
-		}
+	if retry, reason := needsFinalSynthesisRetry(markdown); retry {
 		a.progressf("step=final_synthesis_retry reason=%s", reason)
 		retryPrompt := GenerateMarkdownRetryPrompt(buildAnswerCorpus(log.Phases))
 		markdown, err = a.client.SendText(ctx, sessionID, retryPrompt)
@@ -230,7 +235,7 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 		}
 		a.progressf("step=final_synthesis_retry_end output_chars=%d", len(strings.TrimSpace(markdown)))
 	}
-	if strings.TrimSpace(markdown) == "" || looksLikePhaseReport(markdown) {
+	if retry, _ := needsFinalSynthesisRetry(markdown); retry {
 		return "", nil, ErrEmptyMarkdown
 	}
 	a.progressf("step=analyze_end output_chars=%d elapsed_ms=%d", len(strings.TrimSpace(markdown)), time.Since(started).Milliseconds())

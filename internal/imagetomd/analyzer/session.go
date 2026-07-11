@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -22,6 +23,15 @@ type PhaseLog struct {
 	Goal       string     `json:"goal"`
 	Rounds     []RoundLog `json:"rounds"`
 	ExitReason string     `json:"exit_reason"`
+}
+
+func (p PhaseLog) HasNonEmptyAnswer() bool {
+	for _, r := range p.Rounds {
+		if strings.TrimSpace(r.Answer) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 type RoundLog struct {
