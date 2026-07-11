@@ -90,8 +90,74 @@ build_go() {
     # Ensure bin/ directory exists
     mkdir -p "$PROJECT_ROOT/bin"
 
+    build_go_module() {
+        local module_dir="$1"
+        local module_name="$2"
+        local bin_group="$3"
+
+        step "Feature: $module_name"
+        cd "$module_dir"
+
+        info "Running Go unit tests for $module_name (excluding tests/ directory)..."
+        UNIT_PKGS=$(go list ./... | grep -v '/tests/' | grep -v '/tests$' || true)
+
+        if [[ -z "$UNIT_PKGS" ]]; then
+            warn "No Go unit test packages found for $module_name."
+        elif echo "$UNIT_PKGS" | xargs go test -v -count=1; then
+            success "Unit tests passed for $module_name."
+        else
+            fail "Unit tests failed for $module_name."
+            FAILED=true
+            return 1
+        fi
+
+        info "Building $module_name..."
+        PKG_COUNT=$(go list ./... | wc -l | tr -d ' ')
+        if [[ "$PKG_COUNT" -le 1 ]]; then
+            if go build -o "$PROJECT_ROOT/bin/$bin_group" ./...; then
+                success "Build succeeded for $module_name → bin/$bin_group"
+            else
+                fail "Build failed for $module_name."
+                FAILED=true
+                return 1
+            fi
+        else
+            if go build ./...; then
+                success "Package build succeeded for $module_name."
+            else
+                fail "Build failed for $module_name."
+                FAILED=true
+                return 1
+            fi
+
+            MAIN_PKGS=$(go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./... | awk 'NF')
+            if [[ -n "$MAIN_PKGS" ]]; then
+                mkdir -p "$PROJECT_ROOT/bin/$bin_group"
+                while IFS= read -r main_pkg; do
+                    [[ -n "$main_pkg" ]] || continue
+                    bin_name="$(basename "$main_pkg")"
+                    if ! go build -o "$PROJECT_ROOT/bin/$bin_group/$bin_name" "$main_pkg"; then
+                        fail "Binary build failed for $main_pkg."
+                        FAILED=true
+                        return 1
+                    fi
+                done <<< "$MAIN_PKGS"
+                success "Main binaries built for $module_name → bin/$bin_group/"
+            fi
+        fi
+        cd "$PROJECT_ROOT"
+    }
+
     # Enumerate features/{name}/ directories containing go.mod
     local found_any=false
+    local root_module=""
+
+    if [[ -f "$PROJECT_ROOT/go.mod" ]]; then
+        root_module=$(awk '/^module /{print $2; exit}' "$PROJECT_ROOT/go.mod")
+        found_any=true
+        build_go_module "$PROJECT_ROOT" "entext-root" "entext" || return 1
+    fi
+
     for feature_dir in features/*/; do
         # Skip if glob didn't match (no features/ directories)
         [[ -d "$feature_dir" ]] || continue
@@ -105,41 +171,18 @@ build_go() {
         found_any=true
         local feature_name
         feature_name=$(basename "$feature_dir")
+        feature_module=$(awk '/^module /{print $2; exit}' "$feature_dir/go.mod")
 
-        step "Feature: $feature_name"
-        cd "$PROJECT_ROOT/$feature_dir"
-
-        # --- Unit Tests ---
-        info "Running Go unit tests for $feature_name (excluding tests/ directory)..."
-
-        UNIT_PKGS=$(go list ./... | grep -v '/tests/' | grep -v '/tests$' || true)
-
-        if [[ -z "$UNIT_PKGS" ]]; then
-            warn "No Go unit test packages found for $feature_name."
-        elif echo "$UNIT_PKGS" | xargs go test -v -count=1; then
-            success "Unit tests passed for $feature_name."
-        else
-            fail "Unit tests failed for $feature_name."
-            FAILED=true
-            return 1
+        if [[ -n "$root_module" && "$feature_module" == "$root_module" ]]; then
+            info "Skipping $feature_name — duplicate module path with root ($root_module)."
+            continue
         fi
 
-        # --- Build ---
-        info "Building $feature_name..."
-        if go build -o "$PROJECT_ROOT/bin/$feature_name" ./...; then
-            success "Build succeeded for $feature_name → bin/$feature_name"
-        else
-            fail "Build failed for $feature_name."
-            FAILED=true
-            return 1
-        fi
-
-        cd "$PROJECT_ROOT"
+        build_go_module "$PROJECT_ROOT/$feature_dir" "$feature_name" "$feature_name" || return 1
     done
 
     if [[ "$found_any" == "false" ]]; then
-        warn "No Go projects found under features/*/."
-        warn "Expected structure: features/{name}/go.mod"
+        warn "No Go projects found (root go.mod or features/*/go.mod)."
         return 0
     fi
 }

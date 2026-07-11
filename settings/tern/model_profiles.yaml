@@ -1,0 +1,33 @@
+# model_profiles.yaml - committed profile configuration for in-process tern
+default_profile:
+  provider: openai
+  model: gpt-5.3-codex
+
+providers:
+  openai:
+    keys:
+      - name: default
+        value: vault://providers/openai/default
+        models:
+          - name: gpt-4o
+          - name: gpt-5.5
+          - name: gpt-5.3-codex
+            mode: responses
+
+  anthropic:
+    keys:
+      - name: default
+        value: vault://providers/anthropic/default
+        models:
+          - name: claude-sonnet-4-20250514
+          - name: claude-opus-4-20250514
+
+  ollama:
+    keys:
+      - name: default
+        models:
+          - name: qwen2.5-coder:7b
+            behavior:
+              tool_call_fallback: true
+    network_config:
+      base_url: "http://localhost:11434"

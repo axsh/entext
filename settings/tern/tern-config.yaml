@@ -1,0 +1,10 @@
+# Arctic Tern Server Configuration (committed)
+llm_gateway:
+  port: 14000
+  model_profiles_path: "./model_profiles.yaml"
+
+vault:
+  backend: keyring
+
+agent_service:
+  disable_sandbox: true
