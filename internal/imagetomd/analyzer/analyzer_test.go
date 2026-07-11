@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/axsh/entext/internal/imagetomd/csvhint"
 	"github.com/axsh/entext/internal/imagetomd/tern"
 )
 
@@ -70,7 +71,7 @@ func TestAnalyzeRetriesWhenFinalLooksLikePhaseReport(t *testing.T) {
 		PhaseSleepMS: 0,
 	})
 
-	md, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil)
+	md, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil, nil)
 	if err != nil {
 		t.Fatalf("Analyze failed: %v", err)
 	}
@@ -95,7 +96,7 @@ func TestAnalyzeReturnsEmptyMarkdownErrorWhenRetryStillInvalid(t *testing.T) {
 		PhaseSleepMS: 0,
 	})
 
-	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil)
+	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil, nil)
 	if !errors.Is(err, ErrEmptyMarkdown) {
 		t.Fatalf("expected ErrEmptyMarkdown, got %v", err)
 	}
@@ -121,7 +122,7 @@ func TestAnalyzeProgressContainsPhaseRoundAndRetryFields(t *testing.T) {
 		},
 	})
 
-	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil)
+	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil, nil)
 	if err != nil {
 		t.Fatalf("Analyze failed: %v", err)
 	}
@@ -157,7 +158,7 @@ func TestAnalyzeRetriesWhenFinalLooksLikeExplanatoryReport(t *testing.T) {
 		PhaseSleepMS: 0,
 	})
 
-	md, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil)
+	md, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil, nil)
 	if err != nil {
 		t.Fatalf("Analyze failed: %v", err)
 	}
@@ -185,7 +186,7 @@ func TestAnalyzePhase2RequiresNonEmptyAnswerBeforeSoftLimit(t *testing.T) {
 		},
 	})
 
-	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil)
+	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil, nil)
 	if err != nil {
 		t.Fatalf("Analyze failed: %v", err)
 	}
@@ -217,7 +218,7 @@ func TestAnalyzePhase2ContinuesWhenCompatAssessIsNegated(t *testing.T) {
 		},
 	})
 
-	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil)
+	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil, nil)
 	if err != nil {
 		t.Fatalf("Analyze failed: %v", err)
 	}
@@ -249,7 +250,7 @@ func TestAnalyzeMapsInsufficientAssessmentToSufficientFalse(t *testing.T) {
 		},
 	})
 
-	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil)
+	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil, nil)
 	if err != nil {
 		t.Fatalf("Analyze failed: %v", err)
 	}
@@ -278,7 +279,7 @@ func TestAnalyzePhase2ContinuesWhenAssessIsInsufficientToken(t *testing.T) {
 		},
 	})
 
-	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil)
+	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil, nil)
 	if err != nil {
 		t.Fatalf("Analyze failed: %v", err)
 	}
@@ -315,7 +316,7 @@ func TestAnalyzePersistsSessionIncrementally(t *testing.T) {
 		},
 	})
 
-	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil)
+	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil, nil)
 	if err != nil {
 		t.Fatalf("Analyze failed: %v", err)
 	}
@@ -327,5 +328,117 @@ func TestAnalyzePersistsSessionIncrementally(t *testing.T) {
 	}
 	if lastPhaseCount != len(DefaultPhases) {
 		t.Fatalf("last phase count got %d want %d", lastPhaseCount, len(DefaultPhases))
+	}
+}
+
+type recordingClient struct {
+	queueClient
+	prompts []string
+}
+
+func (c *recordingClient) SendText(ctx context.Context, sessionID string, prompt string) (string, error) {
+	c.prompts = append(c.prompts, prompt)
+	return c.queueClient.SendText(ctx, sessionID, prompt)
+}
+
+func TestAnalyzeInjectsCsvHintOnClassifyAndExecuteNotAssess(t *testing.T) {
+	t.Parallel()
+
+	responses := make([]string, 0, len(DefaultPhases)*3+3)
+	responses = append(responses, "mixed")
+	responses = appendDefaultPhaseResponses(responses, "")
+	responses = append(responses, "# 変更履歴\nok")
+
+	hints := []csvhint.CsvHint{{Path: "h.csv", Content: "a,b\n1,2"}}
+	client := &recordingClient{queueClient: queueClient{responses: responses}}
+	a := New(client, "codex", "gpt-5.3-codex", AnalyzeOptions{
+		MaxRounds:    1,
+		RoundSleepMS: 0,
+		PhaseSleepMS: 0,
+	})
+
+	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil, hints)
+	if err != nil {
+		t.Fatalf("Analyze failed: %v", err)
+	}
+	if len(client.prompts) == 0 {
+		t.Fatalf("expected recorded prompts")
+	}
+	if !strings.Contains(client.prompts[0], "[Reference csv hint]") {
+		t.Fatalf("classify prompt should include csv hint")
+	}
+	var assessPrompt string
+	var phase2ExecutePrompt string
+	for _, prompt := range client.prompts {
+		if strings.Contains(prompt, "現在は画像解析の Phase") {
+			assessPrompt = prompt
+		}
+		if strings.Contains(prompt, "Phase 2 追加指示") {
+			phase2ExecutePrompt = prompt
+		}
+	}
+	if assessPrompt == "" {
+		t.Fatalf("expected assess prompt")
+	}
+	if strings.Contains(assessPrompt, "[Reference csv hint]") {
+		t.Fatalf("assess prompt must not include csv hint")
+	}
+	if phase2ExecutePrompt == "" {
+		t.Fatalf("expected phase2 execute prompt with csv append")
+	}
+	if !strings.Contains(phase2ExecutePrompt, "上記 CSV から転記してよい") {
+		t.Fatalf("phase2 execute missing csv transfer instruction")
+	}
+}
+
+func TestAnalyzeFinalSynthesisIncludesCsvAppendWhenHintsPresent(t *testing.T) {
+	t.Parallel()
+
+	responses := make([]string, 0, len(DefaultPhases)*3+3)
+	responses = append(responses, "mixed")
+	responses = appendDefaultPhaseResponses(responses, "")
+	responses = append(responses, "# 変更履歴\n| No. |\n|---|---|\n| 1 |")
+
+	hints := []csvhint.CsvHint{{Path: "h.csv", Content: "a,b\n1,2"}}
+	client := &recordingClient{queueClient: queueClient{responses: responses}}
+	a := New(client, "codex", "gpt-5.3-codex", AnalyzeOptions{
+		MaxRounds:    1,
+		RoundSleepMS: 0,
+		PhaseSleepMS: 0,
+	})
+
+	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil, hints)
+	if err != nil {
+		t.Fatalf("Analyze failed: %v", err)
+	}
+	finalPrompt := client.prompts[len(client.prompts)-1]
+	if !strings.Contains(finalPrompt, "CSV 参照により取得したセル値") {
+		t.Fatalf("final synthesis missing csv append: %s", finalPrompt)
+	}
+}
+
+func TestAnalyzeWithoutHintsUnchangedPromptShape(t *testing.T) {
+	t.Parallel()
+
+	responses := make([]string, 0, len(DefaultPhases)*3+3)
+	responses = append(responses, "mixed")
+	responses = appendDefaultPhaseResponses(responses, "")
+	responses = append(responses, "# 変更履歴\nok")
+
+	client := &recordingClient{queueClient: queueClient{responses: responses}}
+	a := New(client, "codex", "gpt-5.3-codex", AnalyzeOptions{
+		MaxRounds:    1,
+		RoundSleepMS: 0,
+		PhaseSleepMS: 0,
+	})
+
+	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil, nil)
+	if err != nil {
+		t.Fatalf("Analyze failed: %v", err)
+	}
+	for _, prompt := range client.prompts {
+		if strings.Contains(prompt, "[Reference csv hint]") {
+			t.Fatalf("unexpected csv hint in prompt without hints")
+		}
 	}
 }

@@ -106,3 +106,23 @@ func TestGenerateQuestionPromptForbidsContentValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestAssessGapPromptDoesNotMentionCsvHint(t *testing.T) {
+	t.Parallel()
+	got := AssessGapPrompt(DefaultPhases[1], "INSUFFICIENT")
+	for _, forbidden := range []string{"[Reference csv hint]", "CSV ヒント"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("assess prompt must not mention csv hint, found %q", forbidden)
+		}
+	}
+}
+
+func TestGenerateQuestionPromptDoesNotMentionCsvHint(t *testing.T) {
+	t.Parallel()
+	got := GenerateQuestionPrompt(DefaultPhases[1], "INSUFFICIENT")
+	for _, forbidden := range []string{"[Reference csv hint]", "CSV ヒント"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("question prompt must not mention csv hint, found %q", forbidden)
+		}
+	}
+}

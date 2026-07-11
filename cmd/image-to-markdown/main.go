@@ -27,6 +27,8 @@ func main() {
 		agentName       string
 		modelName       string
 		refPatterns     []string
+		csvHintPaths    []string
+		noCsvHintAuto   bool
 		strictGapJudge  bool
 		saveQuestionLog bool
 		roundSleepMS    int
@@ -86,10 +88,12 @@ func main() {
 			for _, input := range inputs {
 				logger.Debug("starting image analysis", "input", input, "server", serverURL, "model", modelName)
 				job := entext.ImageToMarkdownJob{
-					InputPath:   input,
-					OutputPath:  outputPath,
-					OutputDir:   outputDir,
-					RefPatterns: refPatterns,
+					InputPath:     input,
+					OutputPath:    outputPath,
+					OutputDir:     outputDir,
+					RefPatterns:   refPatterns,
+					CsvHintPaths:  csvHintPaths,
+					NoCsvHintAuto: noCsvHintAuto,
 				}
 				if useStdin {
 					job.OutputPath = ""
@@ -119,6 +123,8 @@ func main() {
 	flags.StringVar(&agentName, "agent", "codex", "Agent name")
 	flags.StringVar(&modelName, "model", "gpt-5.3-codex", "Model name")
 	flags.StringSliceVarP(&refPatterns, "ref", "r", nil, "Reference markdown regex pattern (repeatable)")
+	flags.StringSliceVar(&csvHintPaths, "csv-hint", nil, "Reference CSV hint path (repeatable)")
+	flags.BoolVar(&noCsvHintAuto, "no-csv-hint-auto", false, "Disable automatic CSV hint resolution")
 	flags.BoolVar(&strictGapJudge, "strict-gap-judge", false, "Enable strict SUFFICIENT judgment")
 	flags.BoolVar(&saveQuestionLog, "save-question-log", true, "Store generated question in session log")
 	flags.IntVar(&roundSleepMS, "round-sleep-ms", 5000, "Sleep between question generation and answer")

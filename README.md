@@ -24,10 +24,11 @@ go get github.com/axsh/entext
 
 ## CLI Usage
 
-`entext` provides three CLI commands under `cmd`.
+`entext` provides four CLI commands under `cmd`.
 
 ```bash
 bin/entext/excel-to-pdf -i ./sample.xlsx -o ./tmp/pdf --backend auto
+bin/entext/excel-to-csv -i ./sample.xlsx -o ./tmp/csv --backend auto
 bin/entext/pdf-to-image -i ./tmp/pdf/sample.pdf -o ./tmp/images --format png --backend auto
 bin/entext/image-to-markdown -i ./tmp/images/sample_001.png -o ./tmp/md/sample.md
 ```
@@ -50,9 +51,16 @@ Image-to-markdown tern runtime options:
 Gap judgment is limited to conversion fidelity (faithful transcription from the image) and uses a binary verdict: `SUFFICIENT` or `INSUFFICIENT`.
 Intermediate phase analysis tables and explanatory report sections (for example element inventories or interpretation tables) are not included in the delivered document.
 
+CSV hint options for image-to-markdown:
+
+- `--csv-hint <path>` (repeatable): inject Excel-derived cell-value CSV into Vision prompts.
+- `--no-csv-hint-auto`: disable automatic `<image_basename>.csv` lookup beside the image or in adjacent `csv/` directories.
+- When CSV hints are present, table structure still comes from the image (Vision); bulk cell text may be transcribed from CSV.
+
 Backend selection:
 
 - `excel-to-pdf --backend auto|libreoffice|excel-com`
+- `excel-to-csv --backend auto|libreoffice|excel-com`
   - `auto`: Windows=`excel-com -> libreoffice`, non-Windows=`libreoffice`
 - `pdf-to-image --backend auto|pdftoppm|magick`
   - `auto`: `pdftoppm -> magick`

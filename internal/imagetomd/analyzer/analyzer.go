@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/axsh/entext/internal/imagetomd/csvhint"
 	"github.com/axsh/entext/internal/imagetomd/refresolver"
 	"github.com/axsh/entext/internal/imagetomd/tern"
 )
@@ -45,7 +46,7 @@ func New(client tern.Client, agent string, model string, opts AnalyzeOptions) *A
 	}
 }
 
-func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string, refs []refresolver.RefDocument) (string, *SessionLog, error) {
+func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string, refs []refresolver.RefDocument, csvHints []csvhint.CsvHint) (string, *SessionLog, error) {
 	started := time.Now()
 	a.progressf("step=analyze_start image=%s", imagePath)
 	absPath, err := filepath.Abs(imagePath)
@@ -71,8 +72,10 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 		Phases:    make([]PhaseLog, 0, len(DefaultPhases)),
 	}
 	refContext := buildRefContext(refs)
+	csvContext := buildCsvHintContext(csvHints)
+	visionContext := refContext + csvContext
 
-	classResp, err := a.client.SendText(ctx, sessionID, ClassifyPrompt+refContext+AttachedImageLine(absPath))
+	classResp, err := a.client.SendText(ctx, sessionID, ClassifyPrompt+visionContext+AttachedImageLine(absPath))
 	if err != nil {
 		return "", nil, err
 	}
@@ -170,9 +173,9 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 				return "", nil, err
 			}
 			a.progressf("step=execute_start phase=%d round=%d", phase.Num, roundNum)
-			answerPrompt := question + ExecutionQuestionSuffix + refContext + AttachedImageLine(absPath)
+			answerPrompt := question + ExecutionQuestionSuffix + visionContext + AttachedImageLine(absPath)
 			if phase.Num == 2 {
-				answerPrompt = question + "\n\n" + Phase2ExecuteHint() + ExecutionQuestionSuffix + refContext + AttachedImageLine(absPath)
+				answerPrompt = question + "\n\n" + Phase2ExecuteHint() + phase2CsvExecuteAppend(csvHints) + ExecutionQuestionSuffix + visionContext + AttachedImageLine(absPath)
 			}
 			answer, err := a.client.SendText(ctx, sessionID, answerPrompt)
 			if err != nil {
@@ -229,7 +232,7 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 	}
 
 	a.progressf("step=final_synthesis_start")
-	finalPrompt := GenerateMarkdownPrompt(log.Phases)
+	finalPrompt := GenerateMarkdownPrompt(log.Phases) + csvFinalSynthesisAppend(csvHints)
 	markdown, err := a.client.SendText(ctx, sessionID, finalPrompt)
 	if err != nil {
 		return "", nil, err
@@ -237,7 +240,7 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 	a.progressf("step=final_synthesis_end output_chars=%d", len(strings.TrimSpace(markdown)))
 	if retry, reason := needsFinalSynthesisRetry(markdown); retry {
 		a.progressf("step=final_synthesis_retry reason=%s", reason)
-		retryPrompt := GenerateMarkdownRetryPrompt(buildAnswerCorpus(log.Phases))
+		retryPrompt := GenerateMarkdownRetryPrompt(buildAnswerCorpus(log.Phases)) + csvFinalSynthesisAppend(csvHints)
 		markdown, err = a.client.SendText(ctx, sessionID, retryPrompt)
 		if err != nil {
 			return "", nil, err
