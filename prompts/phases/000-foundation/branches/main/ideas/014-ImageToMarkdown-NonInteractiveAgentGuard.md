@@ -11,11 +11,13 @@
   4. `internal/imagetomd/tern/client.go` が `arcticclient.WithNoTimeout()` を使用しており、HTTP クライアント側のタイムアウトがない
   5. 強制終了時に `codex CLI process exited error=0xffffffff` が記録される
 - ユーザー仮説: Codex エージェントが **インタラクティブな質問モード**（確認待ち・承認待ち・追加情報要求）に入り、パイプラインがユーザー入力を待ち続けている。画像は単純なのに応答が完了しないことから、この仮説は妥当である。
-- 現行実装の **プロンプト付与の不整合**が寄与している可能性が高い:
+- **Tern 側の対応状況（2026-07-12 時点）**: `github.com/axsh/arctic-tern v0.1.2` が entext に取り込み済み。`client/v1` に **`user_input_required` イベント**と **`SendTextWithHandlers` / `RunWithHandlers` / `Session.Respond`** によるインタラクティブハンドラループが追加された。06_List のハングは、旧 `stream.Run()` が `user_input_required` を処理できず応答ループに入れないことが直接原因と考えられる。
+- 現行 entext 実装の **プロンプト付与の不整合**も寄与している可能性が高い:
   - `classify`: `ClassifyPrompt` + `refContext` + `AttachedImageLine` ✅
   - `simple_text` ショートパス: `SimpleTextPrompt` **のみ**（`ExecutionQuestionSuffix` なし、`AttachedImageLine` なし）❌
   - Phase execute: `question` + `ExecutionQuestionSuffix` + `refContext` + `AttachedImageLine` ✅
   - AssessGap / GenerateQuestion / 最終統合: `ExecutionQuestionSuffix` なし（一部は会話禁止の短文指示のみ）
+- 現行 entext `tern/client.go` は **旧 API**（`SendText` → `stream.Run()`）のみ使用しており、v0.1.2 のインタラクティブハンドラを未統合である。
 - `007` 以降、plan-only 応答の検知・最終統合リトライ等の **応答品質ガード**は導入済みだが、**インタラクティブ待ち**と **ストリーム無限ハング**に対する横断的ガードは未定義である。
 - `009` のセッションログ逐次保存により途中状態は追えるが、ハング時は `simple_text_path` 以降の更新がなく、原因特定は `conversion.log` の progress 行に依存する。
 
@@ -23,199 +25,215 @@
 
 | 概念 | 定義 |
 | :--- | :--- |
-| **インタラクティブ質問モード** | エージェントが最終成果物（Markdown テーブル等）を返さず、確認・選択・追加情報を求める応答、またはツール実行・承認待ちによりストリームが完了しない状態。 |
-| **ストリームスタール** | `stream.Run()` が `[DONE]` マーカーなくブロックし続ける状態。`OnText` / `OnResult` が一定時間更新されない。 |
-| **非対話実行サフィックス** | 全 `SendText` 呼び出しに横断付与する、質問・確認・計画説明を禁止し即時データ出力を命じるプロンプト断片。現行の `ExecutionQuestionSuffix` を拡張・統合したもの。 |
-| **応答ガード** | 受信テキストまたはストリームイベントを解析し、インタラクティブモードを検知してリトライ・降格・エラー化する仕組み。 |
+| **インタラクティブ質問モード** | エージェントが最終成果物（Markdown テーブル等）を返さず、確認・選択・追加情報を求める状態。Tern v0.1.2 では **`user_input_required` SSE イベント**として構造化される。 |
+| **インタラクティブハンドラループ** | `RunWithHandlers` が `user_input_required` を受信 → `OnUserInputRequired` で応答文字列を生成 → `Session.Respond` で続行ストリームを取得、を `[DONE]` まで繰り返す仕組み。 |
+| **無人バッチポリシー** | 本パイプラインでは人間が応答しない。`OnUserInputRequired` は **自動応答**（画像忠実転記を促す固定文）または **明示エラー**（`ErrInteractiveInputRequired`）を返す。 |
+| **ストリームスタール** | ハンドラループが `[DONE]` まで進まず、イベント更新が止まる状態。`WithNoTimeout()` 下では無限待ちになりうる。 |
+| **非対話実行サフィックス** | 全 LLM 呼び出しに横断付与する、質問・確認・計画説明を禁止し即時データ出力を命じるプロンプト断片。 |
+| **応答ガード** | Tern イベント + 受信テキスト解析により、インタラクティブモードを検知して自動応答・リトライ・降格・エラー化する仕組み。 |
 
-### arctic-tern ストリームで観測可能なシグナル
+### arctic-tern v0.1.2 のインタラクティブ API（Tern 側 — 実装済み）
 
-`github.com/axsh/arctic-tern/client/v1` の `EventType` には、現行 `tern/client.go` が **未処理**のイベントがある:
+| API / イベント | 説明 |
+| :--- | :--- |
+| `EventUserInputRequired` | エージェントがユーザー入力を要求。`UserInputRequiredEvent{Content, PromptID, Choices}` を含む |
+| `StreamHandlers` | `OnText`, `OnToolUse`, `OnToolResult`, `OnUserInputRequired`, `OnError`, `OnResult` |
+| `Stream.RunWithHandlers(ctx, session, h)` | イベントループ。`user_input_required` 時に `OnUserInputRequired` → `session.Respond` で継続 |
+| `Session.SendTextWithHandlers(ctx, msg, h)` | `SendText` + `RunWithHandlers` の便利メソッド |
+| `Session.Respond(ctx, content)` | 中断セッションへユーザー応答を POST し、続行ストリームを返す |
 
-| EventType | 意味（推定） | 現行の扱い |
+**旧 `stream.Run()` の限界**: `EventText` / `EventToolUse` / `EventResult` / `EventError` のみ処理し、**`user_input_required` を無視する**。ハンドラ未設定の `RunWithHandlers` は `"user input required but no handler configured"` で即エラー終了する。
+
+### 責務分担（Tern vs entext）
+
+| 層 | 責務 | 状態 |
 | :--- | :--- | :--- |
-| `text` | 本文チャンク | `OnText` で処理 ✅ |
-| `result` | 完了結果 | `OnResult` で処理 ✅ |
-| `error` | エラー | `OnError` で処理 ✅ |
-| `tool_use` | ツール呼び出し | **未処理**（ハンドラ未登録） |
-| `system` | システムメッセージ | **未処理** |
-| `node_start` / `node_complete` / `node_failed` | ノード進行 | **未処理** |
-| `progress` | 進捗（WBS 等） | **未処理** |
-
-インタラクティブ待ちは、(a) 応答テキストが質問形式、(b) `tool_use` 後に完了しない、(c) いずれのイベントも来ずスタール、のいずれかで現れると想定する。**専用の `interactive_question` イベント型は存在しない**ため、複合ヒューリスティックが必要である。
+| **arctic-tern v0.1.2** | SSE イベント正規化、`user_input_required` 検出、Respond ループ、ツール結果イベント | ✅ 実装済み |
+| **entext `tern/client.go`** | `SendTextWithHandlers` ベースへ移行。無人バッチ用 `OnUserInputRequired` 注入。タイムアウト。イベント verbose ログ | ❌ 未実装 |
+| **entext `analyzer/`** | 非対話プロンプト横断付与、`simple_text` 画像再添付、応答品質ガード（plan-only / interactive テキスト）、降格 | ❌ 未実装 |
 
 ## 要件 (Requirements)
 
 ### 必須要件
 
-#### A. プロンプトによる抑制（横断適用）
+#### A. プロンプトによる抑制（entext / analyzer — 横断適用）
 
-1. **全 `SendText` 呼び出し**に、非対話実行サフィックスを付与すること。対象は最低限:
+1. **全 LLM 呼び出し**に、非対話実行サフィックスを付与すること。対象は最低限:
    - 分類（`ClassifyPrompt`）
    - `simple_text` ショートパス（`SimpleTextPrompt`）
    - AssessGap（`AssessGapPrompt`）
    - GenerateQuestion（`GenerateQuestionPrompt`）
    - Phase execute（既存 `ExecutionQuestionSuffix` を統合）
    - 最終統合（`GenerateMarkdownPrompt` / `GenerateMarkdownRetryPrompt`）
-2. 非対話実行サフィックスは **単一定数**（例: `NonInteractiveExecutionSuffix`）として `prompts.go` に定義し、`ExecutionQuestionSuffix` を吸収または置換すること。重複付与を避けるラッパー（例: `WrapNonInteractivePrompt(base string) string`）を設けること。
+2. 非対話実行サフィックスは **単一定数**（例: `NonInteractiveExecutionSuffix`）として `prompts.go` に定義し、`ExecutionQuestionSuffix` を吸収または置換すること。
 3. サフィックスに含める禁止事項（最低限）:
-   - ユーザーへの質問・確認要求（「〜ですか？」「どちらを選びますか」等）
-   - 計画・前置き・承諾のみの応答（`I will`, `確認します`, `承知しました` 等）
-   - 追加情報の要求
-   - 対話を前提とした待機
+   - ユーザーへの質問・確認要求
+   - 計画・前置き・承諾のみの応答
+   - 追加情報の要求・対話待ち
 4. サフィックスに含める必須事項:
-   - **即時に要求された形式（Markdown テーブル / リスト / 判定語）のみを出力**すること
+   - **即時に要求された形式のみを出力**すること
    - 本パイプラインは **無人バッチ実行**であり、人間の応答は来ないこと
 5. `simple_text` ショートパスは Phase execute と **同等の画像参照**を付与すること:
-   - `SimpleTextPrompt` + `refContext`（CSV ヒント文脈がある場合）+ `AttachedImageLine(absPath)` + 非対話実行サフィックス
-6. `007`〜`013` の既存プロンプト契約（変換スコープ、CSV 可視スコープ、ギャップ判定語、原表再現制約等）は維持すること。非対話サフィックスは **追加**であり、既存制約を上書きしない。
+   - `SimpleTextPrompt` + `refContext` + `AttachedImageLine(absPath)` + 非対話実行サフィックス
+6. `007`〜`013` の既存プロンプト契約は維持すること。
 
-#### B. ストリーム・応答の検知
+#### B. Tern クライアント統合（entext / tern — v0.1.2 ハンドラ利用）
 
-7. `SendText` に **ストリームスタール検知**を導入すること:
-   - 初回 `OnText` / `OnResult` / `tool_use` / `system` 受信まで、および最終 `[DONE]` までの **最大待機時間**を設定する（既定値は実装計画で決定。例: 初動 120s、全体 600s）。
-   - タイムアウト時は `ErrStreamStall`（または同等の typed error）を返し、無限ハングを禁止する。
-8. `tern/client.go` で `OnToolUse` を登録し、`tool_use` イベントを記録すること。`--verbose` 時は `step=stream_tool_use tool=<name>` を stderr に出力すること。
-9. 受信テキストに対し **`looksLikeInteractiveQuestion(text string) bool`** を実装すること。検知パターンの例（実装で拡張可能）:
-   - 文末が `?` / `？` で、Markdown テーブル行（`|...|`）やリスト行（`- `）を含まない
-   - `確認してください` / `教えてください` / `どちら` / `選択してください` / `please confirm` / `which one` / `could you`
-   - `y/n` / `yes/no` の選択要求
-   - 応答が極端に短く（例: 200 文字未満）、データ行を含まず疑問文のみ
-10. 既存の `looksLikePlanOnly` と連携し、plan-only **または** interactive-question の場合は **同一の再試行フロー**に載せること（execute ラウンドでは現行どおり再質問生成へ）。
-11. `simple_text` パスで interactive-question または plan-only が検知された場合、**1 回**は強化プロンプトで再試行すること。再試行でも不十分なら **complex_table パスへ降格**（Phase 1-4 + 最終統合を実行）すること。降格はセッションログに `simple_text_fallback: complex_table reason=<...>` として記録する。
-12. ストリームスタール・interactive 検知時、セッションログに `agent_guard` フィールド（または同等）で `kind`, `reason`, `retry_count`, `elapsed_ms` を記録すること。
+7. `internal/imagetomd/tern/client.go` の `SendText` を **`SendTextWithHandlers` ベース**に移行すること。旧 `stream.Run()` 単体経路は廃止する。
+8. 無人バッチ用 **`OnUserInputRequired` ハンドラ**を必ず設定すること。方針（実装計画で具体化）:
+   - **既定（推奨）**: 固定の自動応答文を `Session.Respond` 経由で返し、変換を継続する。
+     - 例: 「無人バッチ実行です。確認不要。添付画像を忠実に Markdown 化し、質問せずテーブル/リストを即時出力してください。」
+   - **選択肢付き質問**（`Choices` 非空）: 先頭選択肢、または画像忠実転記を優先する決定的ルールで 1 件を選ぶ。
+   - **上限**: 1 `SendText` 呼び出しあたりの `user_input_required` 自動応答回数に上限（例: 3 回）。超過時は `ErrInteractiveInputRequired`。
+9. `user_input_required` 発火時、セッションログ / verbose progress に記録すること:
+   - `step=agent_guard kind=user_input_required prompt_id=<id> choices=<n> auto_response=<bool>`
+   - `agent_guard` に `content`（質問文の先頭 N 文字）を保存
+10. `OnToolUse` / `OnToolResult` を登録し、verbose 時に `step=stream_tool_use tool=<name>` を出力すること。
+11. **旧来のテキストヒューリスティック** `looksLikeInteractiveQuestion` も **補助層**として維持すること（`user_input_required` イベントが来ず、質問文だけが `OnText` に流れた場合の検知）。plan-only との統合再試行フローは従来どおり。
+12. `simple_text` パスで interactive（イベントまたはテキスト）または plan-only が検知され、自動応答・再試行後も不十分な場合、**complex_table パスへ降格**すること。降格理由を `simple_text_fallback` に記録する。
 
-#### C. タイムアウトとクライアント設定
+#### C. タイムアウトと安全網
 
-13. `WithNoTimeout()` の無制限待ちを廃止し、**コンテキストまたは SendText 単位のデッドライン**を適用すること。`CreateSession` / `Health` 等の短い呼び出しは従来どおり短タイムアウトでよい。
-14. タイムアウト値は `AnalyzeOptions`（または `tern.SendOptions`）で上書き可能とし、単体テストでは短い値を注入できること。
-15. CLI / API の既定挙動は **fail on stall**（エラー終了）とする。`simple_text` 降格は stall ではなく **応答テキストが得られたが品質不十分**な場合に適用する。
+13. `WithNoTimeout()` の無制限待ちを廃止し、**コンテキストまたは SendText 単位のデッドライン**を適用すること。
+14. ハンドラループ全体（複数回の `Respond` を含む）に **総タイムアウト**を設けること（例: 600s）。部分イベント間のアイドルタイムアウト（例: 120s）も任意で設ける。
+15. タイムアウト時は `ErrStreamStall`（または同等）を返し、無限ハングを禁止する。
+16. タイムアウト値は `AnalyzeOptions` / `tern.SendOptions` で上書き可能とし、単体テストでは短い値を注入できること。
+17. **stall** 時の `simple_text` 降格は行わない（応答テキストまたはイベントが得られたが品質不十分な場合のみ降格）。
 
 #### D. 後方互換と契約
 
-16. 非対話ガードは `image-to-markdown` CLI と `ConvertImageToMarkdown` API の両方に同一適用すること。
-17. `--verbose` 時に `step=agent_guard_*` 系の progress を出力し、`conversion.log` からガード発火を追跡可能にすること。
-18. 既存のゴールデンテスト・契約テスト（`007`/`008` の参照パリティ等）を破壊しないこと。
+18. 非対話ガードは `image-to-markdown` CLI と `ConvertImageToMarkdown` API の両方に同一適用すること。
+19. `tern.Client` インターフェース（`SendText(ctx, sessionID, text) (string, error)`）は **analyzer から見た契約を維持**すること。内部実装のみ `SendTextWithHandlers` へ移行。
+20. `--verbose` 時に `step=agent_guard_*` 系 progress を出力すること。
+21. 既存のゴールデンテスト・契約テスト（`007`/`008` 等）を破壊しないこと。
+22. 依存バージョン: `github.com/axsh/arctic-tern v0.1.2` 以上を要求すること（`go.mod` 反映済み）。
 
 ### 任意要件
 
-1. `OnSystem` / `node_*` / `progress` イベントを verbose ログに記録し、将来のインタラクティブモード分類に利用する。
-2. Codex 側の `--ask-for-approval never` 相当の設定が arctic-tern / bifrost 経由で指定可能なら、セッション作成時に注入する（調査結果次第で実装計画に記載）。
-3. ストリール発生時にセッションを `Terminate` してからリトライし、ゾンビセッションを防ぐ。
-4. `agent_guard` のメトリクス（stall 率、interactive 検知率）を変換サマリ JSON に出力する。
+1. `OnSystem` / `node_*` / `progress` イベントを verbose ログに記録する。
+2. Codex 側の `--ask-for-approval never` 相当が arctic-tern セッション作成時に指定可能なら注入する。
+3. stall / interactive 上限超過時にセッションを `Terminate` してからリトライする。
+4. `agent_guard` メトリクス（`user_input_required` 回数、自動応答率、stall 率）を変換サマリに出力する。
+5. `UserInputRequiredEvent.Choices` をセッションログに保存し、デバッグ可能にする。
 
 ## 実現方針 (Implementation Approach)
 
-### 1. 処理フロー（simple_text 重点）
+### 1. 処理フロー（Tern ハンドラ統合 + simple_text）
 
 ```mermaid
 flowchart TD
-    A[classify → simple_text] --> B[SendText: SimpleText + Image + NonInteractive]
-    B --> C{stream 完了?}
-    C -->|stall timeout| D[ErrStreamStall + session log]
-    C -->|text 受信| E{looksLikeInteractiveQuestion or planOnly?}
-    E -->|No| F[Markdown 確定]
-    E -->|Yes, retry=0| G[強化プロンプトで再 SendText]
-    G --> H{品質 OK?}
-    H -->|Yes| F
-    H -->|No| I[complex_table パスへ降格]
-    E -->|Yes, retry済| I
-    I --> J[Phase 1-4 + final synthesis]
+    A[classify → simple_text] --> B[SendText via SendTextWithHandlers]
+    B --> C{イベント}
+    C -->|text chunks| D[本文集約]
+    C -->|user_input_required| E[OnUserInputRequired: 自動応答]
+    E --> F[Session.Respond → 続行ストリーム]
+    F --> C
+    C -->|result / DONE| G{品質チェック}
+    G -->|OK| H[Markdown 確定]
+    G -->|interactive text / plan-only| I[強化プロンプト再試行]
+    I --> J{OK?}
+    J -->|Yes| H
+    J -->|No| K[complex_table 降格]
+    C -->|stall timeout| L[ErrStreamStall]
+    C -->|auto respond 上限超過| M[ErrInteractiveInputRequired]
 ```
 
 ### 2. 主要コンポーネント
 
 | コンポーネント | 配置 | 責務 |
 | :--- | :--- | :--- |
-| `NonInteractiveExecutionSuffix` / `WrapNonInteractivePrompt` | `internal/imagetomd/analyzer/prompts.go` | 横断プロンプト抑制。`ExecutionQuestionSuffix` 統合 |
-| `buildSendPrompt(step, base, ctx)` | `internal/imagetomd/analyzer/analyzer.go` | 各 `SendText` 前に画像行・refContext・サフィックスを一貫付与 |
-| `looksLikeInteractiveQuestion` | `internal/imagetomd/analyzer/quality.go` | 応答テキストのインタラクティブ検知 |
-| `SendOptions` / stall watchdog | `internal/imagetomd/tern/client.go` | タイムアウト、`OnToolUse`、イベント記録、`ErrStreamStall` |
-| `simple_text` 降格 | `internal/imagetomd/analyzer/analyzer.go` | 再試行失敗時に `category` を上書きせず complex 経路へ分岐 |
-| SessionLog 拡張 | `internal/imagetomd/analyzer/session.go` | `agent_guard` / `simple_text_fallback` フィールド追加 |
+| `SendTextWithHandlers` ラッパ | `internal/imagetomd/tern/client.go` | v0.1.2 API 利用。本文集約、`OnUserInputRequired` 注入、タイムアウト |
+| `UnattendedInputHandler` | `internal/imagetomd/tern/interactive.go`（新規） | 自動応答文生成、Choices 選択、回数上限 |
+| `NonInteractiveExecutionSuffix` | `internal/imagetomd/analyzer/prompts.go` | 横断プロンプト抑制 |
+| `buildSendPrompt` | `internal/imagetomd/analyzer/analyzer.go` | 画像行・refContext・サフィックス一貫付与 |
+| `looksLikeInteractiveQuestion` | `internal/imagetomd/analyzer/quality.go` | テキストベース補助検知 |
+| `simple_text` 降格 | `internal/imagetomd/analyzer/analyzer.go` | 再試行失敗時 complex 経路へ |
+| SessionLog 拡張 | `internal/imagetomd/analyzer/session.go` | `agent_guard` / `simple_text_fallback` |
 
-### 3. プロンプト横断付与の設計
+### 3. `tern/client.go` 移行設計
 
-現行の付与マトリクスと目標:
-
-| ステップ | 現行 | 014 後 |
-| :--- | :--- | :--- |
-| classify | 画像 + refContext | + 非対話サフィックス |
-| simple_text | プロンプトのみ | + 画像 + refContext + 非対話サフィックス |
-| assess_gap | 短文の会話禁止のみ | + 非対話サフィックス |
-| generate_question | ルール内に会話禁止 | + 非対話サフィックス |
-| execute | ExecutionQuestionSuffix + 画像 + refContext | サフィックスを統一定数へ移行 |
-| final / retry | データ忠実制約のみ | + 非対話サフィックス |
-
-**非対話サフィックス案（実装時に英日混在で調整可）:**
-
-```
-**CRITICAL — UNATTENDED BATCH MODE**
-- Do NOT ask questions or request confirmation. No human is available to answer.
-- Do NOT plan, explain, or say "I will…" / "確認します". Output the requested data immediately.
-- If information seems ambiguous, choose the most faithful transcription from the attached image and proceed.
-- Output ONLY the requested format (Markdown table / list / category name / SUFFICIENT|INSUFFICIENT).
+```go
+// 概念スケッチ（実装計画で具体化）
+func (c *ArcticClient) SendText(ctx context.Context, sessionID, text string) (string, error) {
+    session, err := c.getSession(sessionID)
+    // ...
+    var texts []string
+    opts := c.sendOptions // timeout, maxAutoResponses, progress callback
+    handlers := arcticclient.StreamHandlers{
+        OnText: func(chunk string) { /* append */ },
+        OnUserInputRequired: c.unattendedHandler.OnUserInputRequired,
+        OnToolUse: func(name string) { /* log */ },
+        OnResult: func() { /* mark done */ },
+    }
+    err = session.SendTextWithHandlers(ctxWithDeadline(ctx, opts), text, handlers)
+    return finalizeResponse(texts, ""), err
+}
 ```
 
-### 4. 検知の限界と方針
+**06_List ハングの想定修正**: Codex が `user_input_required` を送出 → 旧 `Run()` では無視され SSE が `[DONE]` まで到達しない → 無限待ち。**新経路**では `OnUserInputRequired` が自動応答 → `Respond` → 変換継続。
 
-| 手段 | 検知できるもの | 限界 |
-| :--- | :--- | :--- |
-| プロンプト抑制 | 質問形式の明示的応答 | モデル非遵守、無言スタール |
-| `looksLikeInteractiveQuestion` | テキストとして返った質問 | 空応答・スタールは検知不可 |
-| `OnToolUse` | ツール実行フェーズ | ツール名とインタラクティブの対応はエージェント依存 |
-| ストリームスタール timeout | 無限ハング | 遅いが正常な応答を誤検知しないよう閾値調整が必要 |
+### 4. 自動応答ポリシー（無人バッチ）
 
-**結論**: インタラクティブモードを **100% の精度で事前検知する API はない**。本仕様は **プロンプト抑制（予防）+ スタールタイムアウト（安全網）+ 応答ヒューリスティック（事後検知）+ simple_text 降格（回復）** の多層防御とする。
+| 状況 | 自動応答方針 |
+| :--- | :--- |
+| 自由記述の確認質問 | 非対話サフィックスと同等の「確認不要・画像忠実転記・即時出力」固定文 |
+| `Choices` あり | 画像内容と整合する選択肢を優先。決定不能なら先頭 + verbose 警告 |
+| 同一 SendText 内で繰り返し | 回数上限（例: 3）。超過 → `ErrInteractiveInputRequired` |
+| 自動応答後も plan-only / 空 MD | analyzer 側の再試行 → `simple_text` 降格 |
 
-### 5. `06_List_出力選択` との関係
+### 5. 検知の多層防御（改訂）
 
-- 分類 `simple_text` は妥当（小さな一覧表）。
-- ハングは **解析不能**ではなく **エージェント応答完了失敗**とみなす。
-- 014 適用後の期待挙動:
-  1. `simple_text` でも画像パス・非対話サフィックス付きで変換
-  2. スタール時は 600s 以内に `ErrStreamStall` で失敗（無限待ちしない）
-  3. 質問形式応答なら再試行 → 降格で complex 経路が完了まで進む
+| 層 | 手段 | 検知対象 | 提供元 |
+| :--- | :--- | :--- | :--- |
+| 1 予防 | 非対話プロンプト | 質問形式の明示的応答 | entext analyzer |
+| 2 構造化 | `user_input_required` イベント | インタラクティブ待ち（主因） | arctic-tern v0.1.2 |
+| 3 自動回復 | `OnUserInputRequired` + `Respond` | 上記の無人解決 | entext tern |
+| 4 補助 | `looksLikeInteractiveQuestion` | イベントなし質問テキスト | entext analyzer |
+| 5 安全網 | ハンドラループ総タイムアウト | 無限ハング | entext tern |
+
+**結論**: v0.1.2 により **インタラクティブモードの構造化検知が可能**になった。entext 側はハンドラ統合を最優先とし、プロンプト抑制・テキストヒューリスティック・タイムアウトは従来どおり多層防御として維持する。
+
+### 6. `06_List_出力選択` との関係
+
+- 分類 `simple_text` は妥当。
+- ハング原因は **解析不能**ではなく **`user_input_required` 未処理 + 無タイムアウト** とみなす。
+- 014 適用後の期待:
+  1. `SendTextWithHandlers` + 自動応答で `06_List` が完了
+  2. それでも失敗する場合、600s 以内に typed error で終了（無限待ちしない）
+  3. プロンプト修正（画像再添付・非対話サフィックス）で `user_input_required` 自体の発生率を下げる
 
 ## 検証シナリオ (Verification Scenarios)
 
-1. **再現確認（現状の問題固定化）**
-   1. 現行（014 未適用）ビルドで `tmp/output/pc/images/06_List_出力選択.png` を `image-to-markdown` 実行する。
-   2. `step=simple_text_path` の後に長時間（例: 10 分以上）進捗が更新されないことを確認する（既知の事象として記録）。
+1. **再現確認（014 未適用・記録用）**
+   1. 旧 `stream.Run()` 経路で `06_List_出力選択.png` を実行。
+   2. `step=simple_text_path` 後に長時間進捗が止まる既知事象を確認（回帰テストのベースライン）。
 
 2. **014 適用後の 06_List 完了**
-   1. `06_List_出力選択.png` に対し `image-to-markdown` を実行する。
-   2. 無限ハングせず、成功またはタイムアウトエラーで終了する。
-   3. 成功時、出力 MD に次を含む:
-      - Markdown テーブル形式
-      - 列見出し `選択` と `列番号`
-      - 行 `プレナビ` / `44`、`プレ管理` / `47`、`本ナビ` / `50`
-   4. セッションログ `_sessions/06_List_出力選択_session.json` が `simple_text_path` 以降も更新される。
+   1. `06_List_出力選択.png` に対し `image-to-markdown` を実行。
+   2. 無限ハングせず、成功または typed error で終了。
+   3. 成功時、出力 MD に `選択`/`列番号` 見出しと `プレナビ/44`、`プレ管理/47`、`本ナビ/50` を含む。
+   4. verbose ログに `user_input_required` 自動応答が記録されていれば、その内容を確認（発生しなくても成功は許容）。
 
-3. **simple_text プロンプト付与の確認（モック Client）**
-   1. `queueClient` を用いた単体テストで `category=simple_text` の画像を解析する。
-   2. 2 回目の `SendText` に渡るプロンプトに `Attached image:` と非対話サフィックスのキーフレーズが含まれることを検証する。
+3. **SendTextWithHandlers 統合（モック / httptest）**
+   1. SSE ストリームが `user_input_required` → 続行 `text` → `[DONE]` を返すスタブを用意。
+   2. `tern/client.go` が自動応答後に最終テキストを返すこと。
+   3. `OnUserInputRequired` 未設定相当（旧 Run 経路）ではハングまたはエラーになること（回帰確認）。
 
-4. **インタラクティブ応答の検知と再試行**
-   1. モック Client が `simple_text` 2 回目で `Could you confirm which column to use?` を返す設定にする。
-   2. `looksLikeInteractiveQuestion` が true となり、強化プロンプトでの再 `SendText` が発生することを検証する。
-   3. 3 回目で正常な Markdown テーブルを返すと最終 MD が得られること。
+4. **自動応答上限**
+   1. 連続 4 回 `user_input_required` を返すスタブ。
+   2. 3 回まで自動応答、4 回目で `ErrInteractiveInputRequired`。
 
-5. **simple_text → complex_table 降格**
-   1. モック Client が `simple_text` 経路で 2 回連続インタラクティブ応答を返す設定にする。
-   2. Phase 1-4 経路に切り替わり、セッションログに `simple_text_fallback` が記録されること。
+5. **simple_text プロンプト付与（モック Client）**
+   1. 2 回目 `SendText` プロンプトに `Attached image:` と非対話サフィックスが含まれること。
 
-6. **ストリームスタールタイムアウト**
-   1. テスト用 `SendText` が `OnText` も `[DONE]` も返さないスタブを用意する。
-   2. 短い `stall_timeout` で `ErrStreamStall` が返ること。
-   3. プロセスが無限ブロックしないこと。
+6. **テキストベース interactive 検知と降格**
+   1. イベントなしで `Could you confirm...?` のみ返すモック → 再試行 → 降格。
 
-7. **回帰: 01_変更履歴 complex_table 経路**
-   1. `tmp/entext-test/images/pc/01_変更履歴.png`（または同等テストデータ）で変換品質が `008` 契約を満たすこと。
-   2. 非対話サフィックス追加後も No.43/44 行が出力されること。
+7. **ストリームスタールタイムアウト**
+   1. イベント無しスタブ + 短い deadline → `ErrStreamStall`。
 
-8. **横断付与の網羅確認**
-   1. プロンプトラッパ経由で classify / assess / execute / final の各ステップが `WrapNonInteractivePrompt` を通ることを静的テストまたはモックインデックスで確認する。
+8. **回帰: 01_変更履歴 complex_table 経路**
+   1. 非対話ガード追加後も No.43/44 行が出力されること。
 
 ## テスト項目 (Testing for the Requirements)
 
@@ -226,12 +244,12 @@ flowchart TD
    scripts/process/build.sh
    ```
 
-2. ImageToMarkdown 関連の単体テスト（プロンプト付与・品質ガード・モック解析）:
+2. tern + analyzer 単体:
    ```bash
-   go test ./internal/imagetomd/analyzer/... ./internal/imagetomd/tern/... -count=1
+   go test ./internal/imagetomd/tern/... ./internal/imagetomd/analyzer/... -count=1
    ```
 
-3. 契約・参照パリティ回帰（common カテゴリ内の imagetomd 系）:
+3. 契約回帰:
    ```bash
    scripts/process/integration_test.sh --categories "common" --specify "ImageToMarkdown|imagetomd|image-to-markdown"
    ```
@@ -240,20 +258,20 @@ flowchart TD
 
 | 要件 | 検証方法 |
 | :--- | :--- |
-| A1–A6 横断プロンプト抑制 | `TestSimpleTextPromptIncludesNonInteractiveSuffixAndImage`（新規）、`go test ./internal/imagetomd/analyzer/...` |
-| B7 ストリームスタール検知 | `TestSendTextReturnsErrOnStreamStall`（`tern/client_test.go` 新規） |
-| B8 tool_use 記録 | `TestSendTextRecordsToolUse`（新規）、verbose ログ契約テスト |
-| B9–B11 interactive 検知・降格 | `TestLooksLikeInteractiveQuestion_*`、`TestSimpleTextFallsBackToComplexTable`（`quality_test.go` / `analyzer_test.go`） |
-| B12 セッションログ | `TestSessionLogRecordsAgentGuard`（新規） |
-| C13–C15 タイムアウト設定 | `tern` パッケージ単体テスト + `build.sh` |
-| D16–D18 CLI/API 契約 | `tests/image_to_markdown_logging_test.go` + integration_test `common` |
-| 06_List 実画像シナリオ | 手動ではなく、モックで simple_text 経路を再現する契約テストを必須とし、実 LLM E2E は Nightly 任意 |
+| A1–A6 プロンプト抑制 | `TestSimpleTextPromptIncludesNonInteractiveSuffixAndImage` |
+| B7–B10 SendTextWithHandlers 統合 | `TestSendTextHandlesUserInputRequired`（`tern/client_test.go` + SSE スタブ） |
+| B11 テキスト補助検知 | `TestLooksLikeInteractiveQuestion_*` |
+| B12 simple_text 降格 | `TestSimpleTextFallsBackToComplexTable` |
+| C13–C17 タイムアウト | `TestSendTextReturnsErrOnStreamStall`, `TestSendTextRespectsTotalDeadline` |
+| D18–D22 CLI/API 契約 | `tests/image_to_markdown_logging_test.go` + integration_test |
+| 06_List | モック SSE で `user_input_required` シナリオを再現する契約テスト（CI 必須）。実 LLM E2E は Nightly 任意 |
 
 ### Nightly / 任意（実 LLM）
 
 ```bash
-# 外部 tern + 実モデルが利用可能な環境のみ
-go run ./cmd/image-to-markdown --tern-mode inproc -i tmp/output/pc/images/06_List_出力選択.png --output-dir tmp/output/pc/md --verbose
+go run ./cmd/image-to-markdown --tern-mode inproc \
+  -i tmp/output/pc/images/06_List_出力選択.png \
+  --output-dir tmp/output/pc/md --verbose
 ```
 
-成功条件: 10 分以内に終了し、出力 MD にプレナビ/プレ管理/本ナビの 3 行が含まれること。
+成功条件: 10 分以内に終了し、出力 MD に 3 データ行が含まれること。
