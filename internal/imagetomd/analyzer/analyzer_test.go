@@ -41,6 +41,10 @@ func (c *queueClient) TerminateSession(context.Context, string) error {
 	return nil
 }
 
+func (c *queueClient) LastSendGuardEvents() []tern.AgentGuardEvent {
+	return nil
+}
+
 func appendDefaultPhaseResponses(responses []string, phase2Assess string) []string {
 	for _, phase := range DefaultPhases {
 		assess := "SUFFICIENT"
@@ -373,10 +377,8 @@ func TestAnalyzeInjectsCsvHintOnPhase2Round1Only(t *testing.T) {
 		if strings.Contains(prompt, "現在は画像解析の Phase") {
 			assessPrompt = prompt
 		}
-		if strings.Contains(prompt, "Phase 2 追加指示") || strings.Contains(prompt, "| No. | 変更箇所 |") {
-			if strings.Contains(prompt, "CRITICAL: DO NOT PLAN") {
-				phase2ExecutePrompt = prompt
-			}
+		if strings.Contains(prompt, "--- CSV content ---") && strings.Contains(prompt, "| No. | 変更箇所 |") {
+			phase2ExecutePrompt = prompt
 		}
 	}
 	if assessPrompt == "" {
@@ -420,7 +422,7 @@ func TestAnalyzeClassifyUsesRefOnlyWithoutCsv(t *testing.T) {
 		if i == 0 {
 			continue
 		}
-		if strings.Contains(prompt, "現在は画像解析の Phase 1") && strings.Contains(prompt, "CRITICAL: DO NOT PLAN") {
+		if strings.Contains(prompt, "現在は画像解析の Phase 1") && strings.Contains(prompt, "UNATTENDED BATCH MODE") {
 			if strings.Contains(prompt, "--- CSV content ---") {
 				t.Fatalf("phase1 execute must not include csv content")
 			}
@@ -561,4 +563,147 @@ func TestAnalyzeWithoutHintsUnchangedPromptShape(t *testing.T) {
 			t.Fatalf("unexpected csv hint in prompt without hints")
 		}
 	}
+}
+
+func TestAnalyzeSimpleTextPromptIncludesNonInteractiveSuffixAndImage(t *testing.T) {
+	t.Parallel()
+
+	client := &recordingClient{queueClient: queueClient{responses: []string{
+		"simple_text",
+		"| 選択 | 列番号 |\n|---|---|\n| プレナビ | 44 |",
+	}}}
+	a := New(client, "codex", "gpt-5.3-codex", AnalyzeOptions{RoundSleepMS: 0, PhaseSleepMS: 0})
+
+	_, log, err := a.Analyze(context.Background(), "dummy.png", ".", nil, nil)
+	if err != nil {
+		t.Fatalf("Analyze failed: %v", err)
+	}
+	if len(client.prompts) < 2 {
+		t.Fatalf("expected at least 2 prompts, got %d", len(client.prompts))
+	}
+	second := client.prompts[1]
+	if !strings.Contains(second, "[Attached image:") || !strings.Contains(second, "UNATTENDED BATCH MODE") {
+		t.Fatalf("simple_text prompt missing guard pieces: %q", second)
+	}
+	if !log.ShortPath {
+		t.Fatalf("expected short path success")
+	}
+}
+
+func TestAnalyzeSimpleTextRetriesOnInteractiveQuestion(t *testing.T) {
+	t.Parallel()
+
+	client := &recordingClient{queueClient: queueClient{responses: []string{
+		"simple_text",
+		"Could you confirm which column to use?",
+		"| 選択 | 列番号 |\n|---|---|\n| プレナビ | 44 |",
+	}}}
+	a := New(client, "codex", "gpt-5.3-codex", AnalyzeOptions{RoundSleepMS: 0, PhaseSleepMS: 0})
+
+	md, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil, nil)
+	if err != nil {
+		t.Fatalf("Analyze failed: %v", err)
+	}
+	if len(client.prompts) != 3 {
+		t.Fatalf("expected 3 SendText calls, got %d", len(client.prompts))
+	}
+	if !strings.Contains(md, "| 選択 |") {
+		t.Fatalf("unexpected markdown: %s", md)
+	}
+}
+
+func TestAnalyzeSimpleTextFallsBackToComplexTable(t *testing.T) {
+	t.Parallel()
+
+	responses := []string{"simple_text", "Could you confirm?", "Could you confirm again?"}
+	responses = appendDefaultPhaseResponses(responses, "")
+	responses = append(responses, "# Final\n\n| Col |\n|---|\n| v |")
+
+	client := &recordingClient{queueClient: queueClient{responses: responses}}
+	a := New(client, "codex", "gpt-5.3-codex", AnalyzeOptions{
+		MaxRounds:    1,
+		RoundSleepMS: 0,
+		PhaseSleepMS: 0,
+	})
+
+	_, log, err := a.Analyze(context.Background(), "dummy.png", ".", nil, nil)
+	if err != nil {
+		t.Fatalf("Analyze failed: %v", err)
+	}
+	if log.SimpleTextFallback == nil {
+		t.Fatalf("expected simple_text_fallback log")
+	}
+	if log.ShortPath {
+		t.Fatalf("expected complex path after fallback")
+	}
+	if len(log.Phases) == 0 {
+		t.Fatalf("expected complex phases in log")
+	}
+}
+
+func TestAnalyzeSimpleTextDoesNotFallbackOnStreamStall(t *testing.T) {
+	t.Parallel()
+
+	client := &stallOnSecondSendClient{queueClient: queueClient{responses: []string{
+		"simple_text",
+		"unused",
+	}}}
+	a := New(client, "codex", "gpt-5.3-codex", AnalyzeOptions{RoundSleepMS: 0, PhaseSleepMS: 0})
+
+	_, log, err := a.Analyze(context.Background(), "dummy.png", ".", nil, nil)
+	if !errors.Is(err, tern.ErrStreamStall) {
+		t.Fatalf("expected ErrStreamStall, got %v", err)
+	}
+	if log.SimpleTextFallback != nil {
+		t.Fatalf("stall must not trigger fallback")
+	}
+}
+
+func TestSessionLogRecordsAgentGuardEvents(t *testing.T) {
+	t.Parallel()
+
+	client := &guardEventClient{queueClient: queueClient{responses: []string{
+		"simple_text",
+		"| 選択 | 列番号 |\n|---|---|\n| プレナビ | 44 |",
+	}}}
+	a := New(client, "codex", "gpt-5.3-codex", AnalyzeOptions{RoundSleepMS: 0, PhaseSleepMS: 0})
+
+	_, log, err := a.Analyze(context.Background(), "dummy.png", ".", nil, nil)
+	if err != nil {
+		t.Fatalf("Analyze failed: %v", err)
+	}
+	if len(log.AgentGuardEvents) == 0 {
+		t.Fatalf("expected agent guard events in session log")
+	}
+}
+
+type stallOnSecondSendClient struct {
+	queueClient
+}
+
+func (c *stallOnSecondSendClient) SendText(ctx context.Context, sessionID, prompt string) (string, error) {
+	if c.idx == 1 {
+		c.idx++
+		return "", tern.ErrStreamStall
+	}
+	return c.queueClient.SendText(ctx, sessionID, prompt)
+}
+
+type guardEventClient struct {
+	queueClient
+	guard []tern.AgentGuardEvent
+}
+
+func (c *guardEventClient) SendText(ctx context.Context, sessionID, prompt string) (string, error) {
+	out, err := c.queueClient.SendText(ctx, sessionID, prompt)
+	c.guard = []tern.AgentGuardEvent{{
+		Kind:         "user_input_required",
+		PromptID:     "p1",
+		AutoResponse: true,
+	}}
+	return out, err
+}
+
+func (c *guardEventClient) LastSendGuardEvents() []tern.AgentGuardEvent {
+	return c.guard
 }

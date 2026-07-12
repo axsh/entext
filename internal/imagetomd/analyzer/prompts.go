@@ -15,9 +15,15 @@ const ClassifyPrompt = `この画像の内容を分析し、以下のいずれ�
 
 const SimpleTextPrompt = `この画像の内容を全てMarkdownに変換してください。テーブルはMarkdownテーブル形式で全列・全行を省略せずに出力してください。要約や整理は禁止です。画像内のテキストを忠実にデジタル化してください。`
 
-const ExecutionQuestionSuffix = `
+const NonInteractiveExecutionSuffix = `
 
-**CRITICAL: DO NOT PLAN OR EXPLAIN. OUTPUT THE REQUESTED DATA (TABLES/LISTS) IMMEDIATELY. NO PREAMBLE. NO 'I WILL LOOK'. NO 'UNDERSTOOD'. JUST DATA.**`
+**CRITICAL — UNATTENDED BATCH MODE**
+- Do NOT ask questions or request confirmation. No human is available to answer.
+- Do NOT plan, explain, or say "I will…" / "確認します". Output the requested data immediately.
+- If information seems ambiguous, choose the most faithful transcription from the attached image and proceed.
+- Output ONLY the requested format (Markdown table / list / category name / SUFFICIENT|INSUFFICIENT).`
+
+const ExecutionQuestionSuffix = NonInteractiveExecutionSuffix
 
 type Phase struct {
 	Num       int
@@ -86,6 +92,28 @@ func AttachedImageLine(absPath string) string {
 	return fmt.Sprintf("\n\n[Attached image: %s]", absPath)
 }
 
+func WrapNonInteractivePrompt(base string) string {
+	if strings.Contains(base, "UNATTENDED BATCH MODE") {
+		return base
+	}
+	return strings.TrimRight(base, "\n") + NonInteractiveExecutionSuffix
+}
+
+func BuildSimpleTextPrompt(refContext, absPath string) string {
+	return WrapNonInteractivePrompt(SimpleTextPrompt + refContext + AttachedImageLine(absPath))
+}
+
+func BuildClassifyPrompt(refContext, absPath string) string {
+	return WrapNonInteractivePrompt(ClassifyPrompt + refContext + AttachedImageLine(absPath))
+}
+
+func BuildSimpleTextRetryPrompt(refContext, absPath string) string {
+	return WrapNonInteractivePrompt(
+		SimpleTextPrompt+"\n\n前回の応答は不十分でした。質問や確認は禁止。添付画像の全テキストを Markdown テーブルで即時出力してください。"+
+			refContext+AttachedImageLine(absPath),
+	)
+}
+
 func AssessGapPrompt(phase Phase, knownInfo string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, `現在は画像解析の Phase %d: [%s] を実施しています。
@@ -102,11 +130,12 @@ func AssessGapPrompt(phase Phase, knownInfo string) string {
 		b.WriteString(phase2ConversionGapGuide)
 	}
 	b.WriteString("\n回答は簡潔に行い、前置き（「はい、承知しました」等）は不要です。")
+	b.WriteString(NonInteractiveExecutionSuffix)
 	return b.String()
 }
 
 func GenerateQuestionPrompt(phase Phase, gapAssessment string) string {
-	return fmt.Sprintf(`画像解析の Phase %d: [%s] において、以下の不足情報が指摘されました：
+	return WrapNonInteractivePrompt(fmt.Sprintf(`画像解析の Phase %d: [%s] において、以下の不足情報が指摘されました：
 ---
 %s
 ---
@@ -126,7 +155,7 @@ func GenerateQuestionPrompt(phase Phase, gapAssessment string) string {
 		phase.Name,
 		gapAssessment,
 		phase.Goal,
-	)
+	))
 }
 
 func GenerateMarkdownPrompt(phaseLogs []PhaseLog) string {
@@ -165,7 +194,7 @@ func GenerateMarkdownPrompt(phaseLogs []PhaseLog) string {
 4. 禁止: 要素一覧（Phase / 書式・注記・セル結合・突合 / 意味対応・解釈 / 図解概要 / 要素ID・隣接遷移・親子関係の解析専用表（解析メタ表）。
 5. Phase 1/3/4 の中間解析表は素材として使うが、そのまま転載しない。原表セルへマージする。
 6. diagram/mixed 以外では Mermaid と図解説明セクションを出力しない。`)
-	return b.String()
+	return WrapNonInteractivePrompt(b.String())
 }
 
 const tableFaithfulRetryConstraints = `
@@ -178,7 +207,7 @@ func Phase2ExecuteHint() string {
 }
 
 func GenerateMarkdownRetryPrompt(answerCorpus string) string {
-	return `最終Markdownの統合結果が不十分でした。以下の抽出データのみを情報源として、画像内容を最終Markdownに再構成してください。
+	return WrapNonInteractivePrompt(`最終Markdownの統合結果が不十分でした。以下の抽出データのみを情報源として、画像内容を最終Markdownに再構成してください。
 
 [抽出データ]
 ` + answerCorpus + `
@@ -188,5 +217,5 @@ func GenerateMarkdownRetryPrompt(answerCorpus string) string {
 - "Phase", "Q:", "A:", "round", "分析ログ" などの表現は出力に含めないでください。
 - テーブルデータは列・行を省略せず、可能な限り完全再現してください。
 - 要約中心ではなく、元データの忠実な再構成を優先してください。` + tableFaithfulRetryConstraints + `
-- 回答はMarkdown本文のみを返してください。`
+- 回答はMarkdown本文のみを返してください。`)
 }

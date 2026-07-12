@@ -55,3 +55,44 @@ func TestNeedsFinalSynthesisRetryExplanatoryReport(t *testing.T) {
 		t.Fatalf("got retry=%v reason=%q", retry, reason)
 	}
 }
+
+func TestLooksLikeInteractiveQuestion_DetectsJapaneseConfirm(t *testing.T) {
+	t.Parallel()
+	if !looksLikeInteractiveQuestion("列番号を確認してください") {
+		t.Fatalf("expected interactive question")
+	}
+}
+
+func TestLooksLikeInteractiveQuestion_IgnoresTableWithQuestionMark(t *testing.T) {
+	t.Parallel()
+	in := "| 選択? | 列番号 |\n|---|---|\n| a | 1 |"
+	if looksLikeInteractiveQuestion(in) {
+		t.Fatalf("table output should not be interactive")
+	}
+}
+
+func TestLooksLikeInteractiveQuestion_DetectsEnglishCouldYou(t *testing.T) {
+	t.Parallel()
+	if !looksLikeInteractiveQuestion("Could you confirm which column to use?") {
+		t.Fatalf("expected interactive question")
+	}
+}
+
+func TestIsSimpleTextOutputInsufficient(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in     string
+		want   bool
+		reason string
+	}{
+		{in: "", want: true, reason: "empty"},
+		{in: "Could you confirm?", want: true, reason: "interactive_text"},
+		{in: "| a | b |\n|---|---|", want: false, reason: ""},
+	}
+	for _, tc := range cases {
+		got, reason := isSimpleTextOutputInsufficient(tc.in)
+		if got != tc.want || reason != tc.reason {
+			t.Fatalf("in=%q got=%v/%q want=%v/%q", tc.in, got, reason, tc.want, tc.reason)
+		}
+	}
+}

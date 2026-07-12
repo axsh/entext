@@ -2,6 +2,7 @@ package analyzer
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"time"
@@ -84,9 +85,9 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 		refContext: buildRefContext(refs),
 	}
 
-	classResp, err := a.client.SendText(ctx, sessionID, ClassifyPrompt+actx.refContext+AttachedImageLine(absPath))
+	classResp, err := a.sendPrompt(ctx, sessionID, BuildClassifyPrompt(actx.refContext, absPath), log)
 	if err != nil {
-		return "", nil, err
+		return "", log, err
 	}
 	category := extractClassification(classResp)
 	a.progressf("step=classify_done category=%s", category)
@@ -95,14 +96,10 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 
 	if category == "simple_text" {
 		a.progressf("step=simple_text_path")
-		md, err := a.client.SendText(ctx, sessionID, SimpleTextPrompt)
+		md, err := a.runSimpleTextPath(ctx, sessionID, absPath, actx, log, started)
 		if err != nil {
-			return "", nil, err
+			return "", log, err
 		}
-		if strings.TrimSpace(md) == "" {
-			return "", nil, ErrEmptyMarkdown
-		}
-		log.ShortPath = true
 		log.Status = "completed"
 		now := time.Now().UTC()
 		log.CompletedAt = now
@@ -111,6 +108,19 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 		return md, log, nil
 	}
 
+	md, err := a.runComplexPath(ctx, sessionID, absPath, actx, log, started)
+	if err != nil {
+		return "", log, err
+	}
+	now := time.Now().UTC()
+	log.Status = "completed"
+	log.CompletedAt = now
+	log.LastUpdatedAt = now
+	a.persistSession(log, nil)
+	return md, log, nil
+}
+
+func (a *Analyzer) runComplexPath(ctx context.Context, sessionID, absPath string, actx analyzeContext, log *SessionLog, started time.Time) (string, error) {
 	mode := GapJudgeCompat
 	if a.opts.StrictGapJudge {
 		mode = GapJudgeStrict
@@ -138,9 +148,9 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 			a.progressf("step=assess_start phase=%d round=%d", phase.Num, roundNum)
 			promptKnown := buildPromptKnownInfo(actx.visibleScope, lastAnswer, roundNum)
 			assessPrompt := AssessGapPrompt(phase, promptKnown)
-			assessResult, err := a.client.SendText(ctx, sessionID, assessPrompt)
+			assessResult, err := a.sendPrompt(ctx, sessionID, assessPrompt, log)
 			if err != nil {
-				return "", nil, err
+				return "", err
 			}
 			sufficient := IsSufficient(assessResult, mode)
 			a.progressf("step=assess_end phase=%d round=%d sufficient=%t", phase.Num, roundNum, sufficient)
@@ -172,9 +182,9 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 			}
 
 			a.progressf("step=generate_question_start phase=%d round=%d", phase.Num, roundNum)
-			question, err := a.client.SendText(ctx, sessionID, GenerateQuestionPrompt(phase, assessResult))
+			question, err := a.sendPrompt(ctx, sessionID, GenerateQuestionPrompt(phase, assessResult), log)
 			if err != nil {
-				return "", nil, err
+				return "", err
 			}
 			a.progressf("step=generate_question_end phase=%d round=%d question_chars=%d", phase.Num, roundNum, len(strings.TrimSpace(question)))
 			if a.opts.SaveQuestionLog {
@@ -182,7 +192,7 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 			}
 
 			if err := sleepWithContext(ctx, time.Duration(a.opts.RoundSleepMS)*time.Millisecond); err != nil {
-				return "", nil, err
+				return "", err
 			}
 			a.progressf("step=execute_start phase=%d round=%d", phase.Num, roundNum)
 			answerPrompt := question + ExecutionQuestionSuffix + actx.refContext + AttachedImageLine(absPath)
@@ -196,9 +206,9 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 					phase2CsvExecuteAppend(actx.csvHints, actx.visibleScope) +
 					ExecutionQuestionSuffix + actx.refContext + AttachedImageLine(absPath)
 			}
-			answer, err := a.client.SendText(ctx, sessionID, answerPrompt)
+			answer, err := a.sendPrompt(ctx, sessionID, answerPrompt, log)
 			if err != nil {
-				return "", nil, err
+				return "", err
 			}
 			roundLog.Answer = answer
 			answerTrimmed := strings.TrimSpace(answer)
@@ -250,36 +260,31 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 		)
 
 		if err := sleepWithContext(ctx, time.Duration(a.opts.PhaseSleepMS)*time.Millisecond); err != nil {
-			return "", nil, err
+			return "", err
 		}
 	}
 
 	a.progressf("step=final_synthesis_start")
 	finalPrompt := GenerateMarkdownPrompt(log.Phases) + csvFinalSynthesisAppend(actx.csvHints, actx.visibleScope)
-	markdown, err := a.client.SendText(ctx, sessionID, finalPrompt)
+	markdown, err := a.sendPrompt(ctx, sessionID, finalPrompt, log)
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
 	a.progressf("step=final_synthesis_end output_chars=%d", len(strings.TrimSpace(markdown)))
 	if retry, reason := needsFinalSynthesisRetry(markdown); retry {
 		a.progressf("step=final_synthesis_retry reason=%s", reason)
 		retryPrompt := GenerateMarkdownRetryPrompt(buildAnswerCorpus(log.Phases)) + csvFinalSynthesisAppend(actx.csvHints, actx.visibleScope)
-		markdown, err = a.client.SendText(ctx, sessionID, retryPrompt)
+		markdown, err = a.sendPrompt(ctx, sessionID, retryPrompt, log)
 		if err != nil {
-			return "", nil, err
+			return "", err
 		}
 		a.progressf("step=final_synthesis_retry_end output_chars=%d", len(strings.TrimSpace(markdown)))
 	}
 	if retry, _ := needsFinalSynthesisRetry(markdown); retry {
-		return "", nil, ErrEmptyMarkdown
+		return "", ErrEmptyMarkdown
 	}
 	a.progressf("step=analyze_end output_chars=%d elapsed_ms=%d", len(strings.TrimSpace(markdown)), time.Since(started).Milliseconds())
-	now := time.Now().UTC()
-	log.Status = "completed"
-	log.CompletedAt = now
-	log.LastUpdatedAt = now
-	a.persistSession(log, nil)
-	return markdown, log, nil
+	return markdown, nil
 }
 
 func sleepWithContext(ctx context.Context, d time.Duration) error {
@@ -370,6 +375,72 @@ func (a *Analyzer) persistSession(log *SessionLog, inProgress *PhaseLog) {
 		return
 	}
 	a.progressf("step=session_persist status=%s phases=%d in_progress=%t", snap.Status, len(snap.Phases), inProgress != nil)
+}
+
+func (a *Analyzer) sendPrompt(ctx context.Context, sessionID, prompt string, log *SessionLog) (string, error) {
+	out, err := a.client.SendText(ctx, sessionID, prompt)
+	a.mergeGuardEvents(log)
+	return out, err
+}
+
+func (a *Analyzer) mergeGuardEvents(log *SessionLog) {
+	if log == nil {
+		return
+	}
+	for _, ev := range a.client.LastSendGuardEvents() {
+		log.AgentGuardEvents = append(log.AgentGuardEvents, AgentGuardLog{
+			Kind:          ev.Kind,
+			PromptID:      ev.PromptID,
+			ContentPrefix: ev.ContentPrefix,
+			ChoicesCount:  ev.ChoicesCount,
+			PickedIndex:   ev.PickedIndex,
+			AutoResponse:  ev.AutoResponse,
+		})
+	}
+}
+
+func (a *Analyzer) runSimpleTextPath(ctx context.Context, sessionID, absPath string, actx analyzeContext, log *SessionLog, started time.Time) (string, error) {
+	md, err := a.sendPrompt(ctx, sessionID, BuildSimpleTextPrompt(actx.refContext, absPath), log)
+	if err != nil {
+		if errors.Is(err, tern.ErrStreamStall) {
+			return "", err
+		}
+		if errors.Is(err, tern.ErrInteractiveInputRequired) {
+			return a.fallbackSimpleTextToComplex(ctx, sessionID, absPath, actx, log, started, "interactive_limit", 0)
+		}
+		return "", err
+	}
+
+	if insufficient, reason := isSimpleTextOutputInsufficient(md); insufficient {
+		md, err = a.sendPrompt(ctx, sessionID, BuildSimpleTextRetryPrompt(actx.refContext, absPath), log)
+		if err != nil {
+			if errors.Is(err, tern.ErrStreamStall) {
+				return "", err
+			}
+			if errors.Is(err, tern.ErrInteractiveInputRequired) {
+				return a.fallbackSimpleTextToComplex(ctx, sessionID, absPath, actx, log, started, "interactive_limit", 1)
+			}
+			return "", err
+		}
+		if insufficient, reason = isSimpleTextOutputInsufficient(md); insufficient {
+			return a.fallbackSimpleTextToComplex(ctx, sessionID, absPath, actx, log, started, reason, 1)
+		}
+	}
+
+	if strings.TrimSpace(md) == "" {
+		return "", ErrEmptyMarkdown
+	}
+	log.ShortPath = true
+	a.progressf("step=analyze_end output_chars=%d elapsed_ms=%d", len(strings.TrimSpace(md)), time.Since(started).Milliseconds())
+	return md, nil
+}
+
+func (a *Analyzer) fallbackSimpleTextToComplex(ctx context.Context, sessionID, absPath string, actx analyzeContext, log *SessionLog, started time.Time, reason string, retries int) (string, error) {
+	a.progressf("step=simple_text_fallback reason=%s", reason)
+	log.SimpleTextFallback = &SimpleTextFallbackLog{Reason: reason, Retries: retries}
+	log.ShortPath = false
+	a.persistSession(log, nil)
+	return a.runComplexPath(ctx, sessionID, absPath, actx, log, started)
 }
 
 func looksLikePlanOnly(text string) bool {

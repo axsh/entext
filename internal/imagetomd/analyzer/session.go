@@ -9,14 +9,30 @@ import (
 )
 
 type SessionLog struct {
-	ImagePath     string     `json:"image_path"`
-	StartedAt     time.Time  `json:"started_at"`
-	Category      string     `json:"category,omitempty"`
-	ShortPath     bool       `json:"short_path,omitempty"`
-	Status        string     `json:"status,omitempty"`
-	LastUpdatedAt time.Time  `json:"last_updated_at,omitempty"`
-	Phases        []PhaseLog `json:"phases"`
-	CompletedAt   time.Time  `json:"completed_at,omitempty"`
+	ImagePath          string                 `json:"image_path"`
+	StartedAt          time.Time              `json:"started_at"`
+	Category           string                 `json:"category,omitempty"`
+	ShortPath          bool                   `json:"short_path,omitempty"`
+	Status             string                 `json:"status,omitempty"`
+	LastUpdatedAt      time.Time              `json:"last_updated_at,omitempty"`
+	Phases             []PhaseLog             `json:"phases"`
+	CompletedAt        time.Time              `json:"completed_at,omitempty"`
+	AgentGuardEvents   []AgentGuardLog        `json:"agent_guard_events,omitempty"`
+	SimpleTextFallback *SimpleTextFallbackLog `json:"simple_text_fallback,omitempty"`
+}
+
+type AgentGuardLog struct {
+	Kind          string `json:"kind,omitempty"`
+	PromptID      string `json:"prompt_id,omitempty"`
+	ContentPrefix string `json:"content_prefix,omitempty"`
+	ChoicesCount  int    `json:"choices_count,omitempty"`
+	PickedIndex   int    `json:"picked_index,omitempty"`
+	AutoResponse  bool   `json:"auto_response,omitempty"`
+}
+
+type SimpleTextFallbackLog struct {
+	Reason  string `json:"reason"`
+	Retries int    `json:"retries"`
 }
 
 type PhaseLog struct {
