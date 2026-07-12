@@ -194,3 +194,5 @@ go run ./cmd/image-to-markdown --tern-mode inproc \
 ```
 
 成功条件: シナリオ 1 の 2–5 を満たすこと。
+
+> **Implementation plan**: `prompts/phases/000-foundation/branches/main/plans/014-ImageToMarkdown-MultimodalVisionDelivery.md`
