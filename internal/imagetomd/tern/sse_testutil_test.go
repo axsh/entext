@@ -49,6 +49,29 @@ func writeSSEStream(w http.ResponseWriter, events []sseEvent) {
 	writeSSE(w, events)
 }
 
+type capturedMessage struct {
+	Content []map[string]any
+}
+
+func parseMessageBody(r *http.Request) (capturedMessage, error) {
+	var body struct {
+		Content []map[string]any `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		return capturedMessage{}, err
+	}
+	return capturedMessage{Content: body.Content}, nil
+}
+
+func hasImageContentPart(msg capturedMessage) bool {
+	for _, part := range msg.Content {
+		if typ, _ := part["type"].(string); typ == "image" {
+			return true
+		}
+	}
+	return false
+}
+
 type arcticTestServer struct {
 	messageStreams [][]sseEvent
 	respondStreams [][]sseEvent
@@ -56,6 +79,7 @@ type arcticTestServer struct {
 	respondCalls   int
 	hangBody            bool
 	hangAfterFirstEvent bool
+	lastMessage         capturedMessage
 }
 
 func (s *arcticTestServer) handler() http.Handler {
@@ -76,6 +100,9 @@ func (s *arcticTestServer) handler() http.Handler {
 		}
 		idx := s.messageCalls
 		s.messageCalls++
+		if msg, err := parseMessageBody(r); err == nil {
+			s.lastMessage = msg
+		}
 		if s.hangAfterFirstEvent {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)

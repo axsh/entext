@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +18,7 @@ import (
 type Client interface {
 	CreateSession(ctx context.Context, req CreateSessionRequest) (string, error)
 	SendText(ctx context.Context, sessionID string, text string) (string, error)
+	SendImagePrompt(ctx context.Context, sessionID string, prompt string, imagePath string) (string, error)
 	TerminateSession(ctx context.Context, sessionID string) error
 	LastSendGuardEvents() []AgentGuardEvent
 }
@@ -93,6 +96,50 @@ func (c *ArcticClient) CreateSession(ctx context.Context, req CreateSessionReque
 }
 
 func (c *ArcticClient) SendText(ctx context.Context, sessionID string, text string) (string, error) {
+	parts := []arcticclient.ContentPart{{Type: "text", Text: text}}
+	return c.sendMessageWithHandlers(ctx, sessionID, parts, multimodalMeta{})
+}
+
+func (c *ArcticClient) SendImagePrompt(ctx context.Context, sessionID, prompt, imagePath string) (string, error) {
+	cleanPath := filepath.Clean(imagePath)
+	info, err := os.Stat(cleanPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", ErrImageReadFailed
+		}
+		return "", fmt.Errorf("%w: %v", ErrImageReadFailed, err)
+	}
+	if info.Size() > defaultMaxImageBytes {
+		return "", ErrImageTooLarge
+	}
+
+	parts, err := arcticclient.NewMessage().Text(prompt).ImageFile(cleanPath).Build()
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrImageReadFailed, err)
+	}
+
+	if c.opts.Progress != nil {
+		c.opts.Progress(
+			"step=send_multimodal image=%s prompt_chars=%d",
+			filepath.Base(cleanPath),
+			len(prompt),
+		)
+	}
+
+	return c.sendMessageWithHandlers(ctx, sessionID, parts, multimodalMeta{imagePath: cleanPath})
+}
+
+type multimodalMeta struct {
+	imagePath string
+}
+
+func (c *ArcticClient) sendMessageWithHandlers(
+	ctx context.Context,
+	sessionID string,
+	parts []arcticclient.ContentPart,
+	meta multimodalMeta,
+) (string, error) {
+	_ = meta
 	session, err := c.getSession(sessionID)
 	if err != nil {
 		return "", err
@@ -149,7 +196,15 @@ func (c *ArcticClient) SendText(ctx context.Context, sessionID string, text stri
 		},
 	}
 
-	err = session.SendTextWithHandlers(sendCtx, text, handlers)
+	stream, err := session.SendMessage(sendCtx, parts)
+	if err != nil {
+		if idleStop != nil {
+			close(idleStop)
+		}
+		return "", err
+	}
+
+	err = stream.RunWithHandlers(sendCtx, session, handlers)
 	if idleStop != nil {
 		close(idleStop)
 	}
