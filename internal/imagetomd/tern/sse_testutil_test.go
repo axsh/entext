@@ -54,7 +54,8 @@ type arcticTestServer struct {
 	respondStreams [][]sseEvent
 	messageCalls   int
 	respondCalls   int
-	hangBody       bool
+	hangBody            bool
+	hangAfterFirstEvent bool
 }
 
 func (s *arcticTestServer) handler() http.Handler {
@@ -75,6 +76,17 @@ func (s *arcticTestServer) handler() http.Handler {
 		}
 		idx := s.messageCalls
 		s.messageCalls++
+		if s.hangAfterFirstEvent {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			payload, _ := json.Marshal(map[string]any{"type": "text", "content": "partial"})
+			fmt.Fprintf(w, "data: %s\n\n", payload)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			<-r.Context().Done()
+			return
+		}
 		if s.hangBody {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)

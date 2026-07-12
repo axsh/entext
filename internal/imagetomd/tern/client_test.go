@@ -91,7 +91,7 @@ func TestSendTextReturnsErrInteractiveInputRequiredOnFourthPrompt(t *testing.T) 
 func TestSendTextReturnsErrStreamStallOnIdleTimeout(t *testing.T) {
 	t.Parallel()
 
-	srv := newArcticTestServer(&arcticTestServer{hangBody: true})
+	srv := newArcticTestServer(&arcticTestServer{hangAfterFirstEvent: true})
 	defer srv.Close()
 
 	client := NewClientWithSendOptions(srv.URL, SendOptions{

@@ -109,7 +109,6 @@ func (c *ArcticClient) SendText(ctx context.Context, sessionID string, text stri
 		idleStop   chan struct{}
 	)
 
-	lastEvent.Store(time.Now().UnixNano())
 	if c.opts.IdleTimeout > 0 {
 		idleCtx, idleCancel := context.WithCancel(sendCtx)
 		sendCtx = idleCtx
@@ -202,7 +201,11 @@ func (c *ArcticClient) runIdleWatchdog(ctx context.Context, cancel context.Cance
 		case <-stop:
 			return
 		case <-ticker.C:
-			last := time.Unix(0, lastEvent.Load())
+			ts := lastEvent.Load()
+			if ts == 0 {
+				continue
+			}
+			last := time.Unix(0, ts)
 			if time.Since(last) >= idleTimeout {
 				cancel()
 				return
