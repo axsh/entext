@@ -60,6 +60,19 @@ CSV hint options for image-to-markdown:
 - With `*.sheet-map.json` beside the PDF (`../pdf/` from images) and `../csv/{workbook}.sheet-N.csv`, the matching sheet CSV is auto-selected from the image basename (e.g. `01_変更履歴.png` → `workbook.sheet-1.csv`).
 - When CSV hints are present, table structure (columns, blank rows, nesting layout) still comes from the image (Vision).
 
+Unattended batch mode (agent guard):
+
+- `image-to-markdown` is designed for **unattended batch** execution. With `arctic-tern v0.1.2+`, `user_input_required` events are answered automatically (fixed text for free-form prompts; first choice when `choices` are present).
+- Auto-response limit: 3 per `SendText`; a 4th interactive prompt returns a typed error instead of hanging indefinitely.
+- `simple_text` path may fall back to `complex_table` when output looks like a question or plan-only text; stream stall errors do **not** trigger fallback.
+- Nightly manual check (06_List regression):
+  ```bash
+  go run ./cmd/image-to-markdown --tern-mode inproc \
+    -i tmp/output/pc/images/06_List_出力選択.png \
+    --output-dir tmp/output/pc/md --verbose
+  ```
+  Success: finishes within ~10 minutes; Markdown contains プレナビ / プレ管理 / 本ナビ rows.
+
 Backend selection:
 
 - `excel-to-pdf --backend auto|libreoffice|excel-com`
