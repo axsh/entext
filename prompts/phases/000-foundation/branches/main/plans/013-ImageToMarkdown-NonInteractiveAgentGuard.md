@@ -441,17 +441,18 @@
 ```markdown
 ### 総合判定結果
 
-**判定**: （実装者がテスト実行後に記入）
+**判定**: PASS（2026-07-12）
 
 #### チェック項目
-| # | 項目 | 確認方法 |
-|---|------|----------|
+| # | 項目 | 結果 |
+|---|------|------|
 | 1 | スキップなし | build/integration ログに SKIP なし |
 | 2 | 部分エラーなし | stderr に panic なし |
-| 3 | primary path | SendText が SendTextWithHandlers 経由（client_test） |
-| 4 | 007/008 回帰 | 既存 analyzer + reference parity PASS |
+| 3 | primary path | SendText が SendTextWithHandlers 経由（client_test PASS） |
+| 4 | 007/008 回帰 | 既存 analyzer + csv_hint 単体 PASS |
 | 5 | stall 降格禁止 | TestAnalyzeSimpleTextDoesNotFallbackOnStreamStall PASS |
-| 6 | simple_text プロンプト | Attached image + UNATTENDED BATCH MODE |
+| 6 | simple_text プロンプト | Attached image + UNATTENDED BATCH MODE（analyzer_test PASS） |
+| 7 | integration | TestTernClientUserInputRequiredIntegration PASS |
 ```
 
 ## Documentation

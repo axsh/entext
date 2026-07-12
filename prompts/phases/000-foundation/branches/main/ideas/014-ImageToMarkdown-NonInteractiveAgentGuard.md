@@ -275,3 +275,5 @@ go run ./cmd/image-to-markdown --tern-mode inproc \
 ```
 
 成功条件: 10 分以内に終了し、出力 MD に 3 データ行が含まれること。
+
+> **Implementation plan**: `prompts/phases/000-foundation/branches/main/plans/013-ImageToMarkdown-NonInteractiveAgentGuard.md`
