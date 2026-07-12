@@ -3,7 +3,7 @@ module github.com/axsh/entext/features/vault-cli
 go 1.26.4
 
 require (
-	github.com/axsh/arctic-tern v0.1.1
+	github.com/axsh/arctic-tern v0.1.2
 	github.com/spf13/cobra v1.10.2
 )
 

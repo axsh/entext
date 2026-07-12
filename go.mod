@@ -3,7 +3,7 @@ module github.com/axsh/entext
 go 1.26.4
 
 require (
-	github.com/axsh/arctic-tern v0.1.1
+	github.com/axsh/arctic-tern v0.1.2
 	github.com/gen2brain/go-fitz v1.24.15
 	github.com/go-ole/go-ole v1.3.0
 	github.com/jung-kurt/gofpdf v1.16.2
