@@ -332,24 +332,24 @@
 
 **§11.4 セルフレビュー結果**: 上記 PASS 時、tern（ContentPart 送信）→ analyzer（呼び出し分離・classify fallback）→ 公開 API（integration）のボトムアップ確認が完了。`hasImageContentPart` により「テキストのみ POST の迂回」を排除できる。06_List 実 LLM 成功は Nightly 任意だが、mock で multimodal 契約は CI で言い切れる。
 
-### 総合判定プロセス（§12）
-
-実装完了後、Verification Plan 実行後に以下を記録する:
-
-```markdown
 ### 総合判定結果
 
-**判定**: （実装者がテスト実行後に記入）
+**判定**: PASS（2026-07-12）
 
 #### チェック項目
-| # | 項目 | 確認方法 |
-|---|------|----------|
-| 1 | スキップなし | build/integration ログに SKIP なし |
-| 2 | multimodal 経路 | TestSendImagePromptIncludesImageContentPart PASS |
-| 3 | 014 回帰 | AgentGuard + analyzer 既存テスト PASS |
-| 4 | classify fallback | TestAnalyzeClassifyFallbackToComplexOnPlanOnly PASS |
-| 5 | Vision-only プロンプト | TestClassifyPrompt_ForbidsShellAndRequiresVision PASS |
-| 6 | 公開 API 契約 | TestImageToMarkdownMultimodalClassifyIntegration PASS |
+| # | 項目 | 確認方法 | 結果 |
+|---|------|----------|------|
+| 1 | スキップなし | build/integration ログに SKIP なし | PASS |
+| 2 | multimodal 経路 | TestSendImagePromptIncludesImageContentPart PASS | PASS |
+| 3 | 014 回帰 | AgentGuard + analyzer 既存テスト PASS | PASS |
+| 4 | classify fallback | TestAnalyzeClassifyFallbackToComplexOnPlanOnly PASS | PASS |
+| 5 | Vision-only プロンプト | TestClassifyPrompt_ForbidsShellAndRequiresVision PASS | PASS |
+| 6 | 公開 API 契約 | TestImageToMarkdownMultimodalClassifyIntegration PASS | PASS |
+
+検証コマンド:
+```bash
+./scripts/process/build.sh
+./scripts/process/integration_test.sh --specify "ImageToMarkdown|Multimodal|AgentGuard|TernClient"
 ```
 
 ## Documentation

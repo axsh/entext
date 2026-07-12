@@ -3,7 +3,6 @@ package tests
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,38 +13,45 @@ import (
 	"github.com/axsh/entext"
 )
 
-type agentGuardSSEEvent struct {
-	Type     string
-	Content  string
-	ToolName string
-	PromptID string
-	Choices  []string
+type multimodalCapturedMessage struct {
+	Content []map[string]any
 }
 
-func writeAgentGuardSSE(w http.ResponseWriter, events []agentGuardSSEEvent) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.WriteHeader(http.StatusOK)
-	for _, ev := range events {
-		payload := map[string]any{"type": ev.Type, "content": ev.Content}
-		if ev.ToolName != "" {
-			payload["tool_name"] = ev.ToolName
-		}
-		if ev.PromptID != "" {
-			payload["prompt_id"] = ev.PromptID
-		}
-		if len(ev.Choices) > 0 {
-			payload["choices"] = ev.Choices
-		}
-		data, _ := json.Marshal(payload)
-		fmt.Fprintf(w, "data: %s\n\n", data)
+func parseMultimodalMessageBody(r *http.Request) (multimodalCapturedMessage, error) {
+	var body struct {
+		Content []map[string]any `json:"content"`
 	}
-	fmt.Fprintf(w, "data: [DONE]\n\n")
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		return multimodalCapturedMessage{}, err
 	}
+	return multimodalCapturedMessage{Content: body.Content}, nil
 }
 
-func newAgentGuardMockTern(messageStreams, respondStreams [][]agentGuardSSEEvent) *httptest.Server {
+func hasMultimodalImagePart(msg multimodalCapturedMessage) bool {
+	for _, part := range msg.Content {
+		if typ, _ := part["type"].(string); typ == "image" {
+			return true
+		}
+	}
+	return false
+}
+
+func writeMinimalPNG(path string) error {
+	data := []byte{
+		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+		0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+		0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41,
+		0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+		0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00,
+		0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+		0x42, 0x60, 0x82,
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+func newMultimodalMockTern(messageStreams, respondStreams [][]agentGuardSSEEvent, captured *[]multimodalCapturedMessage) *httptest.Server {
 	messageCalls := 0
 	respondCalls := 0
 	mux := http.NewServeMux()
@@ -60,6 +66,11 @@ func newAgentGuardMockTern(messageStreams, respondStreams [][]agentGuardSSEEvent
 		_, _ = w.Write([]byte(`{"session_id":"test-session"}`))
 	})
 	mux.HandleFunc("/api/v1/sessions/test-session/messages", func(w http.ResponseWriter, r *http.Request) {
+		if captured != nil {
+			if msg, err := parseMultimodalMessageBody(r); err == nil {
+				*captured = append(*captured, msg)
+			}
+		}
 		idx := messageCalls
 		messageCalls++
 		if idx >= len(messageStreams) {
@@ -83,20 +94,17 @@ func newAgentGuardMockTern(messageStreams, respondStreams [][]agentGuardSSEEvent
 	return httptest.NewServer(mux)
 }
 
-func TestTernClientUserInputRequiredIntegration(t *testing.T) {
+func TestImageToMarkdownMultimodalClassifyIntegration(t *testing.T) {
 	t.Parallel()
 
-	srv := newAgentGuardMockTern(
+	var captured []multimodalCapturedMessage
+	srv := newMultimodalMockTern(
 		[][]agentGuardSSEEvent{
 			{{Type: "text", Content: "simple_text"}},
-			{{Type: "user_input_required", Content: "Which column?", PromptID: "p1", Choices: []string{"colA", "colB"}}},
+			{{Type: "text", Content: "| 選択 | 列番号 |\n|---|---|\n| プレナビ | 44 |"}, {Type: "result"}},
 		},
-		[][]agentGuardSSEEvent{
-			{
-				{Type: "text", Content: "| 選択 | 列番号 |\n|---|---|\n| プレナビ | 44 |"},
-				{Type: "result"},
-			},
-		},
+		nil,
+		&captured,
 	)
 	defer srv.Close()
 
@@ -127,11 +135,18 @@ func TestTernClientUserInputRequiredIntegration(t *testing.T) {
 	if !strings.Contains(md, "| 選択 |") || !strings.Contains(md, "プレナビ") {
 		t.Fatalf("unexpected markdown: %s", md)
 	}
-	sessionBytes, err := os.ReadFile(artifact.SessionPath)
-	if err != nil {
-		t.Fatalf("read session: %v", err)
+	if len(captured) == 0 {
+		t.Fatalf("expected captured multimodal POST bodies")
 	}
-	if !strings.Contains(string(sessionBytes), "agent_guard_events") {
-		t.Fatalf("expected agent_guard_events in session log: %s", string(sessionBytes))
+	imageFound := false
+	for i, msg := range captured {
+		if hasMultimodalImagePart(msg) {
+			imageFound = true
+			continue
+		}
+		t.Logf("message %d body without image: %+v", i, msg)
+	}
+	if !imageFound {
+		t.Fatalf("expected at least one POST with type:image content part")
 	}
 }
