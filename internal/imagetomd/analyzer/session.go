@@ -19,6 +19,12 @@ type SessionLog struct {
 	CompletedAt        time.Time              `json:"completed_at,omitempty"`
 	AgentGuardEvents   []AgentGuardLog        `json:"agent_guard_events,omitempty"`
 	SimpleTextFallback *SimpleTextFallbackLog `json:"simple_text_fallback,omitempty"`
+	ClassifyFallback   *ClassifyFallbackLog   `json:"classify_fallback,omitempty"`
+}
+
+type ClassifyFallbackLog struct {
+	Reason  string `json:"reason"` // plan_only | error
+	Retries int    `json:"retries"`
 }
 
 type AgentGuardLog struct {

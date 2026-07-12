@@ -26,11 +26,19 @@ func (c *queueClient) CreateSession(context.Context, tern.CreateSessionRequest) 
 }
 
 func (c *queueClient) SendText(context.Context, string, string) (string, error) {
+	return c.dequeue()
+}
+
+func (c *queueClient) SendImagePrompt(context.Context, string, string, string) (string, error) {
+	return c.dequeue()
+}
+
+func (c *queueClient) dequeue() (string, error) {
 	if c.sendErr != nil {
 		return "", c.sendErr
 	}
 	if c.idx >= len(c.responses) {
-		return "", errors.New("unexpected SendText call")
+		return "", errors.New("unexpected send call")
 	}
 	out := c.responses[c.idx]
 	c.idx++
@@ -337,12 +345,23 @@ func TestAnalyzePersistsSessionIncrementally(t *testing.T) {
 
 type recordingClient struct {
 	queueClient
-	prompts []string
+	prompts      []string
+	imagePrompts []imagePromptCall
+}
+
+type imagePromptCall struct {
+	Prompt    string
+	ImagePath string
 }
 
 func (c *recordingClient) SendText(ctx context.Context, sessionID string, prompt string) (string, error) {
 	c.prompts = append(c.prompts, prompt)
 	return c.queueClient.SendText(ctx, sessionID, prompt)
+}
+
+func (c *recordingClient) SendImagePrompt(ctx context.Context, sessionID, prompt, imagePath string) (string, error) {
+	c.imagePrompts = append(c.imagePrompts, imagePromptCall{Prompt: prompt, ImagePath: imagePath})
+	return c.queueClient.SendImagePrompt(ctx, sessionID, prompt, imagePath)
 }
 
 func TestAnalyzeInjectsCsvHintOnPhase2Round1Only(t *testing.T) {
@@ -365,11 +384,11 @@ func TestAnalyzeInjectsCsvHintOnPhase2Round1Only(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Analyze failed: %v", err)
 	}
-	if len(client.prompts) == 0 {
-		t.Fatalf("expected recorded prompts")
+	if len(client.imagePrompts) == 0 {
+		t.Fatalf("expected recorded image prompts")
 	}
-	if strings.Contains(client.prompts[0], "[Reference csv hint]") || strings.Contains(client.prompts[0], "--- CSV content ---") {
-		t.Fatalf("classify prompt must not include csv hint: %s", client.prompts[0])
+	if strings.Contains(client.imagePrompts[0].Prompt, "[Reference csv hint]") || strings.Contains(client.imagePrompts[0].Prompt, "--- CSV content ---") {
+		t.Fatalf("classify prompt must not include csv hint: %s", client.imagePrompts[0].Prompt)
 	}
 	var assessPrompt string
 	var phase2ExecutePrompt string
@@ -377,8 +396,10 @@ func TestAnalyzeInjectsCsvHintOnPhase2Round1Only(t *testing.T) {
 		if strings.Contains(prompt, "現在は画像解析の Phase") {
 			assessPrompt = prompt
 		}
-		if strings.Contains(prompt, "--- CSV content ---") && strings.Contains(prompt, "| No. | 変更箇所 |") {
-			phase2ExecutePrompt = prompt
+	}
+	for _, call := range client.imagePrompts {
+		if strings.Contains(call.Prompt, "--- CSV content ---") && strings.Contains(call.Prompt, "| No. | 変更箇所 |") {
+			phase2ExecutePrompt = call.Prompt
 		}
 	}
 	if assessPrompt == "" {
@@ -418,12 +439,9 @@ func TestAnalyzeClassifyUsesRefOnlyWithoutCsv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Analyze failed: %v", err)
 	}
-	for i, prompt := range client.prompts {
-		if i == 0 {
-			continue
-		}
-		if strings.Contains(prompt, "現在は画像解析の Phase 1") && strings.Contains(prompt, "UNATTENDED BATCH MODE") {
-			if strings.Contains(prompt, "--- CSV content ---") {
+	for _, call := range client.imagePrompts {
+		if strings.Contains(call.Prompt, "現在は画像解析の Phase 1") && strings.Contains(call.Prompt, "UNATTENDED BATCH MODE") {
+			if strings.Contains(call.Prompt, "--- CSV content ---") {
 				t.Fatalf("phase1 execute must not include csv content")
 			}
 		}
@@ -578,10 +596,10 @@ func TestAnalyzeSimpleTextPromptIncludesNonInteractiveSuffixAndImage(t *testing.
 	if err != nil {
 		t.Fatalf("Analyze failed: %v", err)
 	}
-	if len(client.prompts) < 2 {
-		t.Fatalf("expected at least 2 prompts, got %d", len(client.prompts))
+	if len(client.imagePrompts) < 2 {
+		t.Fatalf("expected at least 2 image prompts, got %d", len(client.imagePrompts))
 	}
-	second := client.prompts[1]
+	second := client.imagePrompts[1].Prompt
 	if !strings.Contains(second, "[Attached image:") || !strings.Contains(second, "UNATTENDED BATCH MODE") {
 		t.Fatalf("simple_text prompt missing guard pieces: %q", second)
 	}
@@ -604,8 +622,8 @@ func TestAnalyzeSimpleTextRetriesOnInteractiveQuestion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Analyze failed: %v", err)
 	}
-	if len(client.prompts) != 3 {
-		t.Fatalf("expected 3 SendText calls, got %d", len(client.prompts))
+	if len(client.imagePrompts) != 3 {
+		t.Fatalf("expected 3 SendImagePrompt calls, got %d", len(client.imagePrompts))
 	}
 	if !strings.Contains(md, "| 選択 |") {
 		t.Fatalf("unexpected markdown: %s", md)
@@ -679,14 +697,29 @@ func TestSessionLogRecordsAgentGuardEvents(t *testing.T) {
 
 type stallOnSecondSendClient struct {
 	queueClient
+	sendCalls int
+}
+
+func (c *stallOnSecondSendClient) bumpSend() error {
+	c.sendCalls++
+	if c.sendCalls == 2 {
+		return tern.ErrStreamStall
+	}
+	return nil
 }
 
 func (c *stallOnSecondSendClient) SendText(ctx context.Context, sessionID, prompt string) (string, error) {
-	if c.idx == 1 {
-		c.idx++
-		return "", tern.ErrStreamStall
+	if err := c.bumpSend(); err != nil {
+		return "", err
 	}
 	return c.queueClient.SendText(ctx, sessionID, prompt)
+}
+
+func (c *stallOnSecondSendClient) SendImagePrompt(ctx context.Context, sessionID, prompt, imagePath string) (string, error) {
+	if err := c.bumpSend(); err != nil {
+		return "", err
+	}
+	return c.queueClient.SendImagePrompt(ctx, sessionID, prompt, imagePath)
 }
 
 type guardEventClient struct {
@@ -704,6 +737,166 @@ func (c *guardEventClient) SendText(ctx context.Context, sessionID, prompt strin
 	return out, err
 }
 
+func (c *guardEventClient) SendImagePrompt(ctx context.Context, sessionID, prompt, imagePath string) (string, error) {
+	out, err := c.queueClient.SendImagePrompt(ctx, sessionID, prompt, imagePath)
+	c.guard = []tern.AgentGuardEvent{{
+		Kind:         "user_input_required",
+		PromptID:     "p1",
+		AutoResponse: true,
+	}}
+	return out, err
+}
+
 func (c *guardEventClient) LastSendGuardEvents() []tern.AgentGuardEvent {
 	return c.guard
+}
+
+func TestAnalyzeClassifyUsesSendImagePrompt(t *testing.T) {
+	t.Parallel()
+
+	client := &recordingClient{queueClient: queueClient{responses: []string{
+		"simple_text",
+		"| 選択 | 列番号 |\n|---|---|\n| プレナビ | 44 |",
+	}}}
+	a := New(client, "codex", "gpt-5.3-codex", AnalyzeOptions{RoundSleepMS: 0, PhaseSleepMS: 0})
+
+	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil, nil)
+	if err != nil {
+		t.Fatalf("Analyze failed: %v", err)
+	}
+	if len(client.imagePrompts) < 1 {
+		t.Fatalf("expected classify via SendImagePrompt")
+	}
+	for _, prompt := range client.prompts {
+		if strings.Contains(prompt, "カテゴリーに分類") {
+			t.Fatalf("classify must not use SendText: %q", prompt)
+		}
+	}
+}
+
+func TestAnalyzeAssessGapUsesSendTextOnly(t *testing.T) {
+	t.Parallel()
+
+	responses := make([]string, 0, len(DefaultPhases)*3+3)
+	responses = append(responses, "complex_table")
+	responses = appendDefaultPhaseResponses(responses, "")
+	responses = append(responses, "# Final\n| No |\n|---|\n| 1 |")
+
+	client := &recordingClient{queueClient: queueClient{responses: responses}}
+	a := New(client, "codex", "gpt-5.3-codex", AnalyzeOptions{
+		MaxRounds:    1,
+		RoundSleepMS: 0,
+		PhaseSleepMS: 0,
+	})
+
+	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil, nil)
+	if err != nil {
+		t.Fatalf("Analyze failed: %v", err)
+	}
+	var assessFound bool
+	for _, prompt := range client.prompts {
+		if strings.Contains(prompt, "現在は画像解析の Phase") {
+			assessFound = true
+		}
+	}
+	if !assessFound {
+		t.Fatalf("expected assess via SendText")
+	}
+	var executeFound bool
+	for _, call := range client.imagePrompts {
+		if strings.Contains(call.Prompt, "UNATTENDED BATCH MODE") && strings.Contains(call.Prompt, "[Attached image:") {
+			if !strings.Contains(call.Prompt, "カテゴリーに分類") {
+				executeFound = true
+			}
+		}
+	}
+	if !executeFound {
+		t.Fatalf("expected execute via SendImagePrompt")
+	}
+}
+
+func TestAnalyzeClassifyFallbackToComplexOnPlanOnly(t *testing.T) {
+	t.Parallel()
+
+	responses := []string{
+		"まず画像を解析します",
+		"まず作業ディレクトリ内の画像ファイルを特定し確認します",
+	}
+	responses = appendDefaultPhaseResponses(responses, "")
+	responses = append(responses, "# Final\n| Col |\n|---|\n| v |")
+
+	client := &recordingClient{queueClient: queueClient{responses: responses}}
+	a := New(client, "codex", "gpt-5.3-codex", AnalyzeOptions{
+		MaxRounds:    1,
+		RoundSleepMS: 0,
+		PhaseSleepMS: 0,
+	})
+
+	_, log, err := a.Analyze(context.Background(), "dummy.png", ".", nil, nil)
+	if err != nil {
+		t.Fatalf("Analyze failed: %v", err)
+	}
+	if log.ClassifyFallback == nil || log.ClassifyFallback.Reason != "plan_only" {
+		t.Fatalf("expected classify_fallback plan_only, got %+v", log.ClassifyFallback)
+	}
+	if len(log.Phases) == 0 {
+		t.Fatalf("expected complex path phases after classify fallback")
+	}
+}
+
+func TestAnalyzeClassifyFallbackToComplexOnError(t *testing.T) {
+	t.Parallel()
+
+	responses := make([]string, 0, len(DefaultPhases)*3+3)
+	responses = appendDefaultPhaseResponses(responses, "")
+	responses = append(responses, "# Final\n| Col |\n|---|\n| v |")
+
+	client := &imageErrOnFirstClient{queueClient: queueClient{responses: responses}}
+	a := New(client, "codex", "gpt-5.3-codex", AnalyzeOptions{
+		MaxRounds:    1,
+		RoundSleepMS: 0,
+		PhaseSleepMS: 0,
+	})
+
+	_, log, err := a.Analyze(context.Background(), "dummy.png", ".", nil, nil)
+	if err != nil {
+		t.Fatalf("Analyze failed: %v", err)
+	}
+	if log.ClassifyFallback == nil || log.ClassifyFallback.Reason != "error" {
+		t.Fatalf("expected classify_fallback error, got %+v", log.ClassifyFallback)
+	}
+}
+
+func TestAnalyzeSimpleTextUsesSendImagePrompt(t *testing.T) {
+	t.Parallel()
+
+	client := &recordingClient{queueClient: queueClient{responses: []string{
+		"simple_text",
+		"| 選択 | 列番号 |\n|---|---|\n| プレナビ | 44 |",
+	}}}
+	a := New(client, "codex", "gpt-5.3-codex", AnalyzeOptions{RoundSleepMS: 0, PhaseSleepMS: 0})
+
+	_, _, err := a.Analyze(context.Background(), "dummy.png", ".", nil, nil)
+	if err != nil {
+		t.Fatalf("Analyze failed: %v", err)
+	}
+	if len(client.imagePrompts) < 2 {
+		t.Fatalf("expected 2 image prompts, got %d", len(client.imagePrompts))
+	}
+	if !strings.Contains(client.imagePrompts[1].ImagePath, "dummy.png") {
+		t.Fatalf("unexpected image path: %q", client.imagePrompts[1].ImagePath)
+	}
+}
+
+type imageErrOnFirstClient struct {
+	queueClient
+	imageCalls int
+}
+
+func (c *imageErrOnFirstClient) SendImagePrompt(ctx context.Context, sessionID, prompt, imagePath string) (string, error) {
+	c.imageCalls++
+	if c.imageCalls == 1 {
+		return "", tern.ErrStreamStall
+	}
+	return c.queueClient.SendImagePrompt(ctx, sessionID, prompt, imagePath)
 }

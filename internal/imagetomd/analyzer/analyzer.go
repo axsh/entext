@@ -85,11 +85,11 @@ func (a *Analyzer) Analyze(ctx context.Context, imagePath string, workDir string
 		refContext: buildRefContext(refs),
 	}
 
-	classResp, err := a.sendPrompt(ctx, sessionID, BuildClassifyPrompt(actx.refContext, absPath), log)
+	classResp, err := a.runClassify(ctx, sessionID, absPath, actx, log)
 	if err != nil {
 		return "", log, err
 	}
-	category := extractClassification(classResp)
+	category := classResp
 	a.progressf("step=classify_done category=%s", category)
 	log.Category = category
 	a.persistSession(log, nil)
@@ -206,7 +206,7 @@ func (a *Analyzer) runComplexPath(ctx context.Context, sessionID, absPath string
 					phase2CsvExecuteAppend(actx.csvHints, actx.visibleScope) +
 					ExecutionQuestionSuffix + actx.refContext + AttachedImageLine(absPath)
 			}
-			answer, err := a.sendPrompt(ctx, sessionID, answerPrompt, log)
+			answer, err := a.sendImagePrompt(ctx, sessionID, answerPrompt, absPath, log)
 			if err != nil {
 				return "", err
 			}
@@ -377,6 +377,38 @@ func (a *Analyzer) persistSession(log *SessionLog, inProgress *PhaseLog) {
 	a.progressf("step=session_persist status=%s phases=%d in_progress=%t", snap.Status, len(snap.Phases), inProgress != nil)
 }
 
+func (a *Analyzer) sendImagePrompt(ctx context.Context, sessionID, prompt, imagePath string, log *SessionLog) (string, error) {
+	out, err := a.client.SendImagePrompt(ctx, sessionID, prompt, imagePath)
+	a.mergeGuardEvents(log)
+	return out, err
+}
+
+func (a *Analyzer) runClassify(ctx context.Context, sessionID, absPath string, actx analyzeContext, log *SessionLog) (string, error) {
+	resp, err := a.sendImagePrompt(ctx, sessionID, BuildClassifyPrompt(actx.refContext, absPath), absPath, log)
+	if err != nil {
+		a.progressf("step=classify_fallback reason=error")
+		log.ClassifyFallback = &ClassifyFallbackLog{Reason: "error", Retries: 0}
+		a.persistSession(log, nil)
+		return "complex_table", nil
+	}
+	if looksLikePlanOnly(resp) {
+		resp, err = a.sendImagePrompt(ctx, sessionID, BuildClassifyRetryPrompt(actx.refContext, absPath), absPath, log)
+		if err != nil {
+			a.progressf("step=classify_fallback reason=error")
+			log.ClassifyFallback = &ClassifyFallbackLog{Reason: "error", Retries: 1}
+			a.persistSession(log, nil)
+			return "complex_table", nil
+		}
+		if looksLikePlanOnly(resp) {
+			a.progressf("step=classify_fallback reason=plan_only")
+			log.ClassifyFallback = &ClassifyFallbackLog{Reason: "plan_only", Retries: 1}
+			a.persistSession(log, nil)
+			return "complex_table", nil
+		}
+	}
+	return extractClassification(resp), nil
+}
+
 func (a *Analyzer) sendPrompt(ctx context.Context, sessionID, prompt string, log *SessionLog) (string, error) {
 	out, err := a.client.SendText(ctx, sessionID, prompt)
 	a.mergeGuardEvents(log)
@@ -400,7 +432,7 @@ func (a *Analyzer) mergeGuardEvents(log *SessionLog) {
 }
 
 func (a *Analyzer) runSimpleTextPath(ctx context.Context, sessionID, absPath string, actx analyzeContext, log *SessionLog, started time.Time) (string, error) {
-	md, err := a.sendPrompt(ctx, sessionID, BuildSimpleTextPrompt(actx.refContext, absPath), log)
+	md, err := a.sendImagePrompt(ctx, sessionID, BuildSimpleTextPrompt(actx.refContext, absPath), absPath, log)
 	if err != nil {
 		if errors.Is(err, tern.ErrStreamStall) {
 			return "", err
@@ -412,7 +444,7 @@ func (a *Analyzer) runSimpleTextPath(ctx context.Context, sessionID, absPath str
 	}
 
 	if insufficient, reason := isSimpleTextOutputInsufficient(md); insufficient {
-		md, err = a.sendPrompt(ctx, sessionID, BuildSimpleTextRetryPrompt(actx.refContext, absPath), log)
+		md, err = a.sendImagePrompt(ctx, sessionID, BuildSimpleTextRetryPrompt(actx.refContext, absPath), absPath, log)
 		if err != nil {
 			if errors.Is(err, tern.ErrStreamStall) {
 				return "", err

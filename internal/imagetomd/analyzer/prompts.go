@@ -13,6 +13,14 @@ const ClassifyPrompt = `この画像の内容を分析し、以下のいずれ�
 
 回答は、カテゴリー名（simple_text, complex_table, diagram, mixed）のみ、またはカテゴリー名を含む短い一文で答えてください。`
 
+const ClassifyTableHeuristic = `
+補足: 列見出しとデータ行からなる表形式（行数が少なくても）は complex_table と分類すること。`
+
+const VisionOnlyConstraint = `
+- 外部ツール（OCR, tesseract, shell, ファイル探索コマンド等）の使用を禁止する。
+- 作業ディレクトリ内のファイル検索で画像を探すな。添付画像を Vision で直接読め。
+- 自身の Vision 能力のみで即答すること。`
+
 const SimpleTextPrompt = `この画像の内容を全てMarkdownに変換してください。テーブルはMarkdownテーブル形式で全列・全行を省略せずに出力してください。要約や整理は禁止です。画像内のテキストを忠実にデジタル化してください。`
 
 const NonInteractiveExecutionSuffix = `
@@ -100,16 +108,27 @@ func WrapNonInteractivePrompt(base string) string {
 }
 
 func BuildSimpleTextPrompt(refContext, absPath string) string {
-	return WrapNonInteractivePrompt(SimpleTextPrompt + refContext + AttachedImageLine(absPath))
+	return WrapNonInteractivePrompt(SimpleTextPrompt + VisionOnlyConstraint + refContext + AttachedImageLine(absPath))
 }
 
 func BuildClassifyPrompt(refContext, absPath string) string {
-	return WrapNonInteractivePrompt(ClassifyPrompt + refContext + AttachedImageLine(absPath))
+	return WrapNonInteractivePrompt(
+		ClassifyPrompt + ClassifyTableHeuristic + VisionOnlyConstraint + refContext + AttachedImageLine(absPath),
+	)
+}
+
+func BuildClassifyRetryPrompt(refContext, absPath string) string {
+	return WrapNonInteractivePrompt(
+		ClassifyPrompt+ClassifyTableHeuristic+VisionOnlyConstraint+
+			"\n\n前回は計画文のみでした。ファイル探索・shell は禁止。添付画像を Vision で直接見て、"+
+			"カテゴリー名（simple_text / complex_table / diagram / mixed）のみ即答してください。"+
+			refContext+AttachedImageLine(absPath),
+	)
 }
 
 func BuildSimpleTextRetryPrompt(refContext, absPath string) string {
 	return WrapNonInteractivePrompt(
-		SimpleTextPrompt+"\n\n前回の応答は不十分でした。質問や確認は禁止。添付画像の全テキストを Markdown テーブルで即時出力してください。"+
+		SimpleTextPrompt+VisionOnlyConstraint+"\n\n前回の応答は不十分でした。質問や確認は禁止。添付画像の全テキストを Markdown テーブルで即時出力してください。"+
 			refContext+AttachedImageLine(absPath),
 	)
 }

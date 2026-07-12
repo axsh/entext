@@ -53,3 +53,45 @@ func TestBuildClassifyPrompt_IncludesImageAndSuffix(t *testing.T) {
 		t.Fatalf("unexpected classify prompt: %q", got)
 	}
 }
+
+func TestClassifyPrompt_ForbidsShellAndRequiresVision(t *testing.T) {
+	t.Parallel()
+
+	got := BuildClassifyPrompt("", "/tmp/a.png")
+	for _, token := range []string{"shell", "Vision", "ファイル探索", "添付画像を Vision で直接"} {
+		if !strings.Contains(got, token) {
+			t.Fatalf("missing %q in classify prompt: %q", token, got)
+		}
+	}
+}
+
+func TestClassifyPrompt_MentionsSmallTableAsComplexTable(t *testing.T) {
+	t.Parallel()
+
+	got := BuildClassifyPrompt("", "/tmp/a.png")
+	if !strings.Contains(got, "行数が少なくても") || !strings.Contains(got, "complex_table") {
+		t.Fatalf("missing table heuristic: %q", got)
+	}
+}
+
+func TestBuildClassifyRetryPrompt_IncludesReinforcement(t *testing.T) {
+	t.Parallel()
+
+	got := BuildClassifyRetryPrompt("", "/tmp/a.png")
+	for _, token := range []string{"前回は計画文のみでした", "ファイル探索", "shell", "Vision で直接見て"} {
+		if !strings.Contains(got, token) {
+			t.Fatalf("missing %q in retry prompt: %q", token, got)
+		}
+	}
+}
+
+func TestSimpleTextPrompt_ForbidsShellAndRequiresVision(t *testing.T) {
+	t.Parallel()
+
+	got := BuildSimpleTextPrompt("", "/tmp/a.png")
+	for _, token := range []string{"shell", "Vision", "ファイル探索", "添付画像を Vision で直接"} {
+		if !strings.Contains(got, token) {
+			t.Fatalf("missing %q in simple_text prompt: %q", token, got)
+		}
+	}
+}
