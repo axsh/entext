@@ -165,4 +165,4 @@ flowchart LR
 
 ---
 
-> **Implementation plan**: （未作成 — ユーザー指示後に `plans/015-ImageToMarkdown-AgentStreamObservability.md` を作成）
+> **Implementation plan**: `prompts/phases/000-foundation/branches/main/plans/015-ImageToMarkdown-AgentStreamObservability.md`
