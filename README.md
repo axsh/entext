@@ -24,13 +24,14 @@ go get github.com/axsh/entext
 
 ## CLI Usage
 
-`entext` provides four CLI commands under `cmd`.
+`entext` provides CLI commands under `cmd` (conversion tools plus Excel template analyze; `excel-fill` is planned next).
 
 ```bash
 bin/entext/excel-to-pdf -i ./sample.xlsx -o ./tmp/pdf --backend auto
 bin/entext/excel-to-csv -i ./sample.xlsx -o ./tmp/csv --backend auto
 bin/entext/pdf-to-image -i ./tmp/pdf/sample.pdf -o ./tmp/images --format png --backend auto
 bin/entext/image-to-markdown -i ./tmp/images/sample_001.png -o ./tmp/md/sample.md
+bin/entext/excel-template-analyze -i ./template.xlsx -o ./tmp/structure/template.structure.md
 ```
 
 All commands support:
@@ -59,6 +60,15 @@ CSV hint options for image-to-markdown:
 - Full CSV body is attached only on **Phase 2 execute round 1** (scope-filtered excerpt). Classify and Phase 1 execute do not receive CSV content.
 - With `*.sheet-map.json` beside the PDF (`../pdf/` from images) and `../csv/{workbook}.sheet-N.csv`, the matching sheet CSV is auto-selected from the image basename (e.g. `01_変更履歴.png` → `workbook.sheet-1.csv`).
 - When CSV hints are present, table structure (columns, blank rows, nesting layout) still comes from the image (Vision).
+
+Excel template analyze (`excel-template-analyze`):
+
+- Builds a **structure markdown** for later fill workflows: Vision semantic structure + excelize cell mapping.
+- `-i/--input` template workbook, `-o/--output` or `--output-dir` (`<basename>.structure.md`).
+- Hints (same names as fill): `--ref` (regexp), `--ref-dir` (recursive `.md`), `--prompt`, `--prompt-file`.
+- `--keep-work-dir` keeps intermediate PDF/images.
+- Tern options mirror `image-to-markdown` (`--tern-mode`, `--tern-config`, `--server-url`, `--agent`, `--model`).
+- Go API: `AnalyzeExcelTemplate(job, cfg)`.
 
 Multimodal vision delivery:
 

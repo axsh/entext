@@ -402,6 +402,10 @@ func toolCommand(t *testing.T, name string, args ...string) *exec.Cmd {
 		pkg = "./cmd/excel-to-csv"
 	case "pdf-to-image":
 		pkg = "./cmd/pdf-to-image"
+	case "excel-template-analyze":
+		pkg = "./cmd/excel-template-analyze"
+	case "excel-fill":
+		pkg = "./cmd/excel-fill"
 	default:
 		t.Fatalf("unsupported tool name: %s", name)
 	}

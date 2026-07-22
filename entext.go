@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/axsh/entext/internal/common/apperr"
-	"github.com/axsh/entext/internal/exceltopdf"
+	"github.com/axsh/entext/internal/common/refprompt"
+	"github.com/axsh/entext/internal/excelanalyze"
 	"github.com/axsh/entext/internal/exceltocsv"
+	"github.com/axsh/entext/internal/exceltopdf"
 	"github.com/axsh/entext/internal/imagetomd/analyzer"
 	"github.com/axsh/entext/internal/imagetomd/converter"
 	"github.com/axsh/entext/internal/imagetomd/csvhint"
@@ -73,6 +76,36 @@ type ImageToMarkdownJob struct {
 type MarkdownArtifact struct {
 	MarkdownPath string
 	SessionPath  string
+}
+
+type ExcelTemplateAnalyzeJob struct {
+	InputPath   string
+	OutputPath  string
+	OutputDir   string
+	KeepWorkDir string
+	RefPatterns []string
+	RefDirs     []string
+	Prompts     []string
+	PromptFiles []string
+}
+
+type ExcelTemplateAnalyzeConfig struct {
+	ServerURL      string
+	Agent          string
+	Model          string
+	TernMode       string
+	TernConfigPath string
+	PDFBackend     string
+	PDFEngine      string
+	ImageBackend   string
+	ImageEngine    string
+	DPI            int
+	Verbose        bool
+	Quiet          bool
+}
+
+type StructureArtifact struct {
+	StructurePath string
 }
 
 var (
@@ -371,6 +404,112 @@ func ConvertImageToMarkdown(ctx context.Context, job ImageToMarkdownJob, cfg Ima
 		MarkdownPath: targetMD,
 		SessionPath:  filepath.Join(sessionDir, basename+"_session.json"),
 	}, nil
+}
+
+func AnalyzeExcelTemplate(ctx context.Context, job ExcelTemplateAnalyzeJob, cfg ExcelTemplateAnalyzeConfig) (StructureArtifact, error) {
+	if strings.TrimSpace(job.InputPath) == "" {
+		return StructureArtifact{}, newValidation("input_path is required")
+	}
+	outPath := strings.TrimSpace(job.OutputPath)
+	if outPath == "" {
+		if strings.TrimSpace(job.OutputDir) == "" {
+			return StructureArtifact{}, newValidation("output_path or output_dir is required")
+		}
+		base := strings.TrimSuffix(filepath.Base(job.InputPath), filepath.Ext(job.InputPath))
+		outPath = filepath.Join(job.OutputDir, base+".structure.md")
+	}
+	if cfg.Agent == "" {
+		cfg.Agent = "codex"
+	}
+	if cfg.Model == "" {
+		cfg.Model = "gpt-5.3-codex"
+	}
+	if cfg.TernMode == "" {
+		cfg.TernMode = string(tern.ModeAuto)
+	}
+	switch cfg.TernMode {
+	case string(tern.ModeAuto), string(tern.ModeExternal), string(tern.ModeInProc):
+	default:
+		return StructureArtifact{}, newValidation("tern mode must be auto, external, or inproc")
+	}
+	if cfg.PDFBackend == "" {
+		cfg.PDFBackend = exceltopdf.BackendAuto
+	}
+	if cfg.PDFEngine == "" {
+		cfg.PDFEngine = exceltopdf.EngineGoNative
+	}
+	if cfg.ImageBackend == "" {
+		cfg.ImageBackend = pdftoimage.BackendAuto
+	}
+	if cfg.ImageEngine == "" {
+		cfg.ImageEngine = pdftoimage.EngineGoNative
+	}
+	if !isValidExcelBackend(cfg.PDFBackend) {
+		return StructureArtifact{}, newValidation("excel backend must be auto, libreoffice, or excel-com")
+	}
+	if !isValidPDFBackend(cfg.ImageBackend) {
+		return StructureArtifact{}, newValidation("pdf image backend must be auto, pdftoppm, or magick")
+	}
+	if !isValidEngine(cfg.PDFEngine) || !isValidEngine(cfg.ImageEngine) {
+		return StructureArtifact{}, newValidation("engine must be go-native or legacy")
+	}
+
+	hints := refprompt.HintInput{
+		RefPatterns: job.RefPatterns,
+		RefDirs:     job.RefDirs,
+		Prompts:     job.Prompts,
+		PromptFiles: job.PromptFiles,
+		Root:        ".",
+	}
+	if _, err := refprompt.Resolve(hints); err != nil {
+		return StructureArtifact{}, wrapError(err)
+	}
+
+	runtime, err := tern.BuildRuntime(ctx, tern.RuntimeRequest{
+		Mode:           tern.Mode(cfg.TernMode),
+		ExternalServer: cfg.ServerURL,
+		ConfigPath:     cfg.TernConfigPath,
+		Agent:          cfg.Agent,
+		Model:          cfg.Model,
+		WorkingDir:     ".",
+	})
+	if err != nil {
+		return StructureArtifact{}, wrapError(err)
+	}
+	defer func() { _ = runtime.Shutdown(context.Background()) }()
+
+	logf := func(format string, args ...any) {
+		if !cfg.Verbose || cfg.Quiet {
+			return
+		}
+		_, _ = fmt.Fprintf(os.Stderr, "[excel-template-analyze] "+format+"\n", args...)
+	}
+	logf("step=runtime_ready mode=%s endpoint=%s", runtime.ModeUsed, runtime.Endpoint)
+
+	res, err := excelanalyze.Analyze(ctx, excelanalyze.Options{
+		InputPath:   job.InputPath,
+		OutputPath:  outPath,
+		KeepWorkDir: job.KeepWorkDir,
+		Hints:       hints,
+		Pipeline: excelanalyze.PipelineOptions{
+			PDFBackend:   cfg.PDFBackend,
+			PDFEngine:    cfg.PDFEngine,
+			ImageBackend: cfg.ImageBackend,
+			ImageEngine:  cfg.ImageEngine,
+			DPI:          cfg.DPI,
+		},
+		Semantic: &excelanalyze.TernSemanticAnalyzer{
+			Client: runtime.Client,
+			Agent:  cfg.Agent,
+			Model:  cfg.Model,
+		},
+		Verbose: cfg.Verbose,
+		Logf:    logf,
+	})
+	if err != nil {
+		return StructureArtifact{}, wrapError(err)
+	}
+	return StructureArtifact{StructurePath: res.StructurePath}, nil
 }
 
 func isValidExcelBackend(backend string) bool {
