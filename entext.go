@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,8 @@ import (
 	"github.com/axsh/entext/internal/common/apperr"
 	"github.com/axsh/entext/internal/common/refprompt"
 	"github.com/axsh/entext/internal/excelanalyze"
+	"github.com/axsh/entext/internal/excelfill"
+	"github.com/axsh/entext/internal/excelfill/dialog"
 	"github.com/axsh/entext/internal/exceltocsv"
 	"github.com/axsh/entext/internal/exceltopdf"
 	"github.com/axsh/entext/internal/imagetomd/analyzer"
@@ -106,6 +109,42 @@ type ExcelTemplateAnalyzeConfig struct {
 
 type StructureArtifact struct {
 	StructurePath string
+}
+
+type ExcelFillJob struct {
+	TemplatePath    string
+	StructurePath   string
+	OutputPath      string
+	RefPatterns     []string
+	RefDirs         []string
+	Prompts         []string
+	PromptFiles     []string
+	Mode            string
+	MaxRetries      int
+	ContinueRetries int
+}
+
+type ExcelFillConfig struct {
+	ServerURL      string
+	Agent          string
+	Model          string
+	TernMode       string
+	TernConfigPath string
+	PDFBackend     string
+	PDFEngine      string
+	ImageBackend   string
+	ImageEngine    string
+	DPI            int
+	Verbose        bool
+	Quiet          bool
+	Stdin          io.Reader
+	Stdout         io.Writer
+	Stderr         io.Writer
+}
+
+type ExcelFillArtifact struct {
+	OutputPath  string
+	RetriesUsed int
 }
 
 var (
@@ -510,6 +549,136 @@ func AnalyzeExcelTemplate(ctx context.Context, job ExcelTemplateAnalyzeJob, cfg 
 		return StructureArtifact{}, wrapError(err)
 	}
 	return StructureArtifact{StructurePath: res.StructurePath}, nil
+}
+
+func FillExcel(ctx context.Context, job ExcelFillJob, cfg ExcelFillConfig) (ExcelFillArtifact, error) {
+	if strings.TrimSpace(job.TemplatePath) == "" {
+		return ExcelFillArtifact{}, newValidation("template path is required")
+	}
+	if strings.TrimSpace(job.StructurePath) == "" {
+		return ExcelFillArtifact{}, newValidation("structure path is required")
+	}
+	if strings.TrimSpace(job.OutputPath) == "" {
+		return ExcelFillArtifact{}, newValidation("output path is required")
+	}
+	mode := strings.TrimSpace(job.Mode)
+	if mode == "" {
+		mode = "text"
+	}
+	if mode != "text" && mode != "json" {
+		return ExcelFillArtifact{}, newValidation("mode must be text or json")
+	}
+	if cfg.Agent == "" {
+		cfg.Agent = "codex"
+	}
+	if cfg.Model == "" {
+		cfg.Model = "gpt-5.3-codex"
+	}
+	if cfg.TernMode == "" {
+		cfg.TernMode = string(tern.ModeAuto)
+	}
+	switch cfg.TernMode {
+	case string(tern.ModeAuto), string(tern.ModeExternal), string(tern.ModeInProc):
+	default:
+		return ExcelFillArtifact{}, newValidation("tern mode must be auto, external, or inproc")
+	}
+	if cfg.PDFBackend == "" {
+		cfg.PDFBackend = exceltopdf.BackendAuto
+	}
+	if cfg.PDFEngine == "" {
+		cfg.PDFEngine = exceltopdf.EngineGoNative
+	}
+	if cfg.ImageBackend == "" {
+		cfg.ImageBackend = pdftoimage.BackendAuto
+	}
+	if cfg.ImageEngine == "" {
+		cfg.ImageEngine = pdftoimage.EngineGoNative
+	}
+
+	hints := refprompt.HintInput{
+		RefPatterns: job.RefPatterns,
+		RefDirs:     job.RefDirs,
+		Prompts:     job.Prompts,
+		PromptFiles: job.PromptFiles,
+		Root:        ".",
+	}
+	if _, err := refprompt.Resolve(hints); err != nil {
+		return ExcelFillArtifact{}, wrapError(err)
+	}
+
+	stdin := cfg.Stdin
+	if stdin == nil {
+		stdin = os.Stdin
+	}
+	stdout := cfg.Stdout
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	stderr := cfg.Stderr
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+
+	var transport dialog.Transport
+	if mode == "json" {
+		transport = dialog.NewJSONTransport(stdin, stdout)
+	} else {
+		transport = dialog.NewTextTransport(stdin, stderr)
+	}
+
+	runtime, err := tern.BuildRuntime(ctx, tern.RuntimeRequest{
+		Mode:           tern.Mode(cfg.TernMode),
+		ExternalServer: cfg.ServerURL,
+		ConfigPath:     cfg.TernConfigPath,
+		Agent:          cfg.Agent,
+		Model:          cfg.Model,
+		WorkingDir:     ".",
+	})
+	if err != nil {
+		return ExcelFillArtifact{}, wrapError(err)
+	}
+	defer func() { _ = runtime.Shutdown(context.Background()) }()
+
+	logf := func(format string, args ...any) {
+		if !cfg.Verbose || cfg.Quiet {
+			return
+		}
+		_, _ = fmt.Fprintf(stderr, "[excel-fill] "+format+"\n", args...)
+	}
+
+	res, err := excelfill.Fill(ctx, excelfill.Options{
+		TemplatePath:    job.TemplatePath,
+		StructurePath:   job.StructurePath,
+		OutputPath:      job.OutputPath,
+		Hints:           hints,
+		Mode:            mode,
+		MaxRetries:      job.MaxRetries,
+		ContinueRetries: job.ContinueRetries,
+		Transport:       transport,
+		Filler: &excelfill.TernFiller{
+			Client: runtime.Client,
+			Agent:  cfg.Agent,
+			Model:  cfg.Model,
+		},
+		Visual: &excelfill.TernVisualChecker{
+			Client: runtime.Client,
+			Agent:  cfg.Agent,
+			Model:  cfg.Model,
+		},
+		Pipeline: excelanalyze.PipelineOptions{
+			PDFBackend:   cfg.PDFBackend,
+			PDFEngine:    cfg.PDFEngine,
+			ImageBackend: cfg.ImageBackend,
+			ImageEngine:  cfg.ImageEngine,
+			DPI:          cfg.DPI,
+		},
+		Verbose: cfg.Verbose,
+		Logf:    logf,
+	})
+	if err != nil {
+		return ExcelFillArtifact{OutputPath: res.OutputPath, RetriesUsed: res.RetriesUsed}, wrapError(err)
+	}
+	return ExcelFillArtifact{OutputPath: res.OutputPath, RetriesUsed: res.RetriesUsed}, nil
 }
 
 func isValidExcelBackend(backend string) bool {

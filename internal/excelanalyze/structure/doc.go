@@ -35,6 +35,7 @@ type Field struct {
 	ID    string
 	Label string
 	Role  string
+	Sheet string
 	Cells []string
 	Merge string
 }

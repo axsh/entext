@@ -24,7 +24,7 @@ go get github.com/axsh/entext
 
 ## CLI Usage
 
-`entext` provides CLI commands under `cmd` (conversion tools plus Excel template analyze; `excel-fill` is planned next).
+`entext` provides CLI commands under `cmd`.
 
 ```bash
 bin/entext/excel-to-pdf -i ./sample.xlsx -o ./tmp/pdf --backend auto
@@ -32,6 +32,7 @@ bin/entext/excel-to-csv -i ./sample.xlsx -o ./tmp/csv --backend auto
 bin/entext/pdf-to-image -i ./tmp/pdf/sample.pdf -o ./tmp/images --format png --backend auto
 bin/entext/image-to-markdown -i ./tmp/images/sample_001.png -o ./tmp/md/sample.md
 bin/entext/excel-template-analyze -i ./template.xlsx -o ./tmp/structure/template.structure.md
+bin/entext/excel-fill --template ./template.xlsx --structure ./tmp/structure/template.structure.md -o ./tmp/filled.xlsx --mode text --max-retries 5
 ```
 
 All commands support:
@@ -69,6 +70,15 @@ Excel template analyze (`excel-template-analyze`):
 - `--keep-work-dir` keeps intermediate PDF/images.
 - Tern options mirror `image-to-markdown` (`--tern-mode`, `--tern-config`, `--server-url`, `--agent`, `--model`).
 - Go API: `AnalyzeExcelTemplate(job, cfg)`.
+
+Excel fill (`excel-fill`):
+
+- Fills a template using structure markdown with interactive dialog (`--mode text|json`).
+- Required: `--template`, `--structure`, `-o/--output`.
+- Shared hints: `--ref`, `--ref-dir`, `--prompt`, `--prompt-file`.
+- `--max-retries` (default 5) counts visual verification failures; `--continue-retries` auto-extends when exhausted.
+- After each fill: Excel→PDF→image visual check for cutoff/overflow; issues feed the next rewrite round.
+- Go API: `FillExcel(job, cfg)`.
 
 Multimodal vision delivery:
 

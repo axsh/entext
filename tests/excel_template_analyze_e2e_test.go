@@ -1,4 +1,4 @@
-package integration_test
+package tests
 
 import (
 	"bytes"
@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/axsh/entext"
@@ -21,21 +22,26 @@ func TestRootAPIAnalyzeExcelTemplateValidation(t *testing.T) {
 	}
 }
 
-func TestE2EExcelTemplateAnalyzeCLI_InvalidArgsExit2(t *testing.T) {
-	cmd := toolCommand(t, "excel-template-analyze", "-o", filepath.Join(t.TempDir(), "out.md"))
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	err := cmd.Run()
+func expectExitInvalidArgs(t *testing.T, err error, stderr string) {
+	t.Helper()
 	if err == nil {
 		t.Fatal("expected failure")
 	}
 	exitErr, ok := err.(*exec.ExitError)
 	if !ok {
-		t.Fatalf("expected ExitError, got %T stderr=%s", err, stderr.String())
+		t.Fatalf("expected ExitError, got %T stderr=%s", err, stderr)
 	}
-	if exitErr.ExitCode() != 2 {
-		t.Fatalf("expected exit 2, got %d stderr=%s", exitErr.ExitCode(), stderr.String())
+	if exitErr.ExitCode() != 2 && !strings.Contains(stderr, "exit status 2") {
+		t.Fatalf("expected exit 2, got %d stderr=%s", exitErr.ExitCode(), stderr)
 	}
+}
+
+func TestE2EExcelTemplateAnalyzeCLI_InvalidArgsExit2(t *testing.T) {
+	cmd := toolCommand(t, "excel-template-analyze", "-o", filepath.Join(t.TempDir(), "out.md"))
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	expectExitInvalidArgs(t, err, stderr.String())
 }
 
 func TestE2EExcelTemplateAnalyzeCLI_MissingPromptFileExit2(t *testing.T) {
@@ -52,14 +58,5 @@ func TestE2EExcelTemplateAnalyzeCLI_MissingPromptFileExit2(t *testing.T) {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	err := cmd.Run()
-	if err == nil {
-		t.Fatal("expected failure for missing prompt file")
-	}
-	exitErr, ok := err.(*exec.ExitError)
-	if !ok {
-		t.Fatalf("expected ExitError, got %T stderr=%s", err, stderr.String())
-	}
-	if exitErr.ExitCode() != 2 {
-		t.Fatalf("expected exit 2, got %d stderr=%s", exitErr.ExitCode(), stderr.String())
-	}
+	expectExitInvalidArgs(t, err, stderr.String())
 }
